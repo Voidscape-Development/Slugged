@@ -1,0 +1,9 @@
+[submodule "deps/slughorn"]
+	path = deps/slughorn
+	url = https://github.com/AlphaPixel/slughorn.git
+[submodule "deps/harfbuzz"]
+	path = deps/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz.git
+[submodule "deps/sheenbidi"]
+	path = deps/sheenbidi
+	url = https://github.com/Tehreer/SheenBidi.git
