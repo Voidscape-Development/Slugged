@@ -94,7 +94,21 @@ add_subdirectory("${SLUGGED_DEPS_DIR}/slughorn" EXCLUDE_FROM_ALL SYSTEM)
 # translation units of ours that include them.
 foreach(_slugged_dep IN ITEMS slughorn harfbuzz SheenBidi)
   if(TARGET ${_slugged_dep})
-    set_target_properties(${_slugged_dep} PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
+    set_target_properties(
+      ${_slugged_dep}
+      PROPERTIES
+        COMPILE_WARNING_AS_ERROR OFF
+        # The Makefile and Ninja generators honour COMPILE_WARNING_AS_ERROR, but
+        # Xcode does not: OBS sets GCC_TREAT_WARNINGS_AS_ERRORS as a global Xcode
+        # build setting, which that property cannot override. Clearing the
+        # attribute per target is the equivalent lever on macOS.
+        XCODE_ATTRIBUTE_GCC_TREAT_WARNINGS_AS_ERRORS "NO"
+        # The plugin is a shared module, so everything linked into it has to be
+        # position independent. slughorn sets this itself; SheenBidi does not,
+        # and its thread-local scratch buffer produces a TLS relocation that a
+        # shared object cannot use.
+        POSITION_INDEPENDENT_CODE ON
+    )
   endif()
 endforeach()
 
