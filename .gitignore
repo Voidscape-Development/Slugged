@@ -6,8 +6,10 @@
 !/build-aux
 !/cmake
 !/data
+!/deps
 !/src
 !.clang-format
+!.gitmodules
 !.gersemirc
 !.gitignore
 !buildspec.json

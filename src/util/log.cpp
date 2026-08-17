@@ -1,6 +1,6 @@
 /*
-Plugin Name
-Copyright (C) <Year> <Developer> <Email Address>
+Slugged - GPU vector text for OBS Studio
+Copyright (C) 2026 Voidscape Development
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,19 +16,30 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-#include <obs-module.h>
-#include <plugin-support.h>
+#include "log.hpp"
 
-OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
+namespace slugged {
 
-bool obs_module_load(void)
-{
-	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
-	return true;
+namespace {
+LogSink g_sink = nullptr;
 }
 
-void obs_module_unload(void)
+void setLogSink(LogSink sink)
 {
-	obs_log(LOG_INFO, "plugin unloaded");
+	g_sink = sink;
 }
+
+void slugged_log(int level, const char *format, ...)
+{
+	if (!g_sink)
+		return;
+
+	va_list args;
+	va_start(args, format);
+
+	g_sink(level, format, args);
+
+	va_end(args);
+}
+
+} // namespace slugged

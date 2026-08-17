@@ -1,59 +1,98 @@
-# OBS Plugin Template
+# Slugged
 
-## Introduction
+GPU vector text for OBS Studio, built on [slughorn](https://github.com/AlphaPixel/slughorn) — AlphaPixel's
+MIT-licensed implementation of Eric Lengyel's Slug algorithm.
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+OBS's built-in text sources rasterise glyphs to a bitmap at one fixed size. Scale that source up in a
+scene and you magnify the bitmap, so edges go soft and stair-stepped. Slugged keeps glyphs as Bézier
+curves on the GPU and solves coverage per pixel, in the fragment shader, at whatever size the pixel
+happens to be. Text stays exact at any scale, in the preview and on stream.
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+## What it adds
 
-## Supported Build Environments
+Everything the GDI+ text source does — font, colour, opacity, outline, drop shadow, background,
+alignment, fixed extents with word wrap, read-from-file, chat log mode — plus:
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+- **Per-character styling.** Font, size, weight, colour, outline and spacing can vary within one
+  source instead of applying to the whole block.
+- **Real text shaping.** HarfBuzz for ligatures, kerning and complex scripts, SheenBidi for
+  right-to-left and mixed-direction text, and automatic font fallback for characters the chosen font
+  lacks.
+- **Variable fonts.** Weight, width, slant and any other axis a font exposes, as live sliders.
+- **Colour fonts.** COLRv0 and COLRv1 emoji, gradients included.
+- **Gradients** across the block or ramped per character.
+- **Motion presets** — fade, slide, pop, typewriter, wave — staggered per character, word or line,
+  plus continuous scrolling for tickers and credit rolls.
+- **Template tokens** like `{time}`, `{uptime}` and your own variables, resolved at render time.
+- **A WYSIWYG editor window** whose preview is a live OBS render of the source itself.
+- **An overlay filter** variant, to lay text over any other source.
 
-## Quick Start
+## Editing
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+Add a **Slugged Text** source and click **Edit in Slugged Editor…**. The preview on the left is the
+real source, rendered through the real shader, so it shows exactly what the scene shows. Select text
+to style just that part; with nothing selected, changes apply to the whole source. Every change
+applies immediately.
 
-## Documentation
+The standard properties dialog stays fully functional for everything that does not need
+per-character control, and the plain `text` property is kept in sync — so obs-websocket, Lua and
+Python scripts, and tools like Streamer.bot drive a Slugged source exactly as they drive a GDI+ one.
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+## Migrating
 
-Suggested reading to get up and running:
+The properties dialog has an **Import from text source** list. Pick any existing GDI+ or FreeType2
+text source and Slugged reproduces its font, colour, outline, alignment, background, wrapping and
+file/chat-log configuration. A GDI+ gradient imports as its primary colour; rebuild it in the editor,
+which offers more control than GDI+ did.
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
+## Building
 
-## GitHub Actions & CI
+Dependencies are vendored as submodules and built from source, so a clone plus a configure is all
+that is needed:
 
-Default GitHub Actions workflows are available for the following repository actions:
+```sh
+git clone --recursive https://github.com/Voidscape-Development/Slugged.git
+cd Slugged
+cmake --preset ubuntu-x86_64     # or windows-x64, macos
+cmake --build --preset ubuntu-x86_64
+```
 
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
+| Dependency | Source | Why vendored |
+|---|---|---|
+| slughorn | submodule | No distribution packages exist |
+| HarfBuzz | submodule | Consistent shaping across all three platforms |
+| SheenBidi | submodule | Small, CMake-native bidi implementation |
+| FreeType | system / obs-deps | Already shipped with OBS |
+| fontconfig | system (Linux only) | Font enumeration; Windows uses DirectWrite, macOS CoreText |
 
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
+Qt 6 and the OBS frontend API are used for the editor window. Building with `-DENABLE_QT=OFF`
+produces a working source without the editor, configured entirely from the properties dialog.
 
-### Retrieving build artifacts
+## How it fits together
 
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
+```
+Document (rich text runs)
+  → Shaper      HarfBuzz + SheenBidi + font fallback
+  → Layout      line breaking, alignment, positioned glyphs
+  → AtlasCache  glyph outlines → slughorn Atlas → curve + band textures
+  → Geometry    one quad per glyph fill, outline and shadow
+  → Renderer    libobs gs_* buffers, textures and the Slug effect
+```
 
-### Building a Release
+`core/`, `text/` and most of `render/` contain no libobs or Qt code, so the whole pipeline from
+document to vertex data can be built and tested without an OBS instance.
 
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
+Three details of the port are worth knowing if you work on the renderer, and each is commented where
+it matters:
 
-## Signing and Notarizing on macOS
+- libobs exposes **no UINT texture format**, so slughorn's `RGBA16UI` band texture is uploaded as
+  `GS_RGBA16` (UNORM) and multiplied back by 65535 in the shader. The bytes are identical; only the
+  interpretation differs.
+- OBS's `.effect` dialect has no `asuint()`, so Slug's sign-bit root classification is expressed as
+  boolean logic over three comparisons. The derivation is written out in `data/effects/slugged.effect`.
+- libobs's `struct vec3` is **16 bytes**, not 12, so vertex positions are emitted with a stride of
+  four floats.
 
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+## Licence
+
+GPL-2.0-or-later, matching OBS Studio. slughorn, HarfBuzz and SheenBidi are MIT-licensed.
