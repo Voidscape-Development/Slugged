@@ -54,10 +54,7 @@ include(FetchContent)
 set(SLUGGED_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
 
 if(NOT EXISTS "${SLUGGED_DEPS_DIR}/slughorn/CMakeLists.txt")
-  message(
-    FATAL_ERROR
-    "Submodules are missing. Run:\n  git submodule update --init --recursive"
-  )
+  message(FATAL_ERROR "Submodules are missing. Run:\n  git submodule update --init --recursive")
 endif()
 
 find_package(Freetype REQUIRED)
@@ -69,35 +66,39 @@ set(HB_BUILD_UTILS OFF CACHE BOOL "" FORCE)
 set(HB_HAVE_FREETYPE ON CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 
-add_subdirectory("${SLUGGED_DEPS_DIR}/harfbuzz" EXCLUDE_FROM_ALL)
+add_subdirectory("${SLUGGED_DEPS_DIR}/harfbuzz" EXCLUDE_FROM_ALL SYSTEM)
 
 # ---- SheenBidi ----
 set(SHEENBIDI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SHEENBIDI_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 
-add_subdirectory("${SLUGGED_DEPS_DIR}/sheenbidi" EXCLUDE_FROM_ALL)
+add_subdirectory("${SLUGGED_DEPS_DIR}/sheenbidi" EXCLUDE_FROM_ALL SYSTEM)
 
 # ---- slughorn ----
 set(SLUGHORN_FREETYPE ON CACHE BOOL "" FORCE)
 
-add_subdirectory("${SLUGGED_DEPS_DIR}/slughorn" EXCLUDE_FROM_ALL)
+add_subdirectory("${SLUGGED_DEPS_DIR}/slughorn" EXCLUDE_FROM_ALL SYSTEM)
 
-# slughorn compiles itself with -Werror, which is right for its own CI but turns
-# any warning in a new compiler release into a broken build here. Relax it for
-# the vendored copy only; our own sources keep the project's warning settings.
-if(TARGET slughorn)
-  target_compile_options(
-    slughorn
-    PRIVATE
-      $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wno-error>
-      $<$<CXX_COMPILER_ID:MSVC>:/WX->
-  )
-endif()
+# The vendored dependencies are compiled with this project's warning flags,
+# because OBS's compilerconfig applies them at directory scope before these
+# subdirectories are added. Combined with CMAKE_COMPILE_WARNING_AS_ERROR (set by
+# the CMake presets), an unused parameter in someone else's library fails our
+# build.
+#
+# COMPILE_WARNING_AS_ERROR is the right lever rather than appending -Wno-error:
+# CMake emits its own -Werror *after* all target options, so a target-level
+# -Wno-error is silently overridden. Our own sources keep warnings as errors.
+#
+# The SYSTEM keyword above covers the other half of the problem -- warnings
+# raised inside these libraries' *headers*, which would otherwise fail the
+# translation units of ours that include them.
+foreach(_slugged_dep IN ITEMS slughorn harfbuzz SheenBidi)
+  if(TARGET ${_slugged_dep})
+    set_target_properties(${_slugged_dep} PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
+  endif()
+endforeach()
 
-target_link_libraries(
-  ${CMAKE_PROJECT_NAME}
-  PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype
-)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype)
 
 # fontconfig is the font-enumeration backend on Linux only; Windows uses
 # DirectWrite and macOS uses CoreText, both of which ship with the OS.

@@ -230,9 +230,8 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 
 		const Style &style = *g.style;
 
-		const float startTime = motion.motion == Motion::None
-						? 0.0f
-						: staggerIndex(g, motion.order) * motion.stagger;
+		const float startTime = motion.motion == Motion::None ? 0.0f
+								      : staggerIndex(g, motion.order) * motion.stagger;
 
 		QuadParams params;
 

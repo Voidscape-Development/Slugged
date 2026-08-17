@@ -87,9 +87,8 @@ void SluggedSource::rebuild()
 	if (mode == TextSourceMode::File || local.plainText() != resolved)
 		local.setPlainText(resolved);
 
-	const float available = local.sizeMode == SizeMode::Fixed
-					? std::max(0.0f, local.boxWidth - 2.0f * local.padding)
-					: 0.0f;
+	const float available =
+		local.sizeMode == SizeMode::Fixed ? std::max(0.0f, local.boxWidth - 2.0f * local.padding) : 0.0f;
 
 	layout = Layout::run(local, available);
 
@@ -308,8 +307,7 @@ void renderText(SluggedSource *ctx)
 		// and head meet seamlessly instead of the text popping back.
 		if (local.scroll.loop) {
 			const float spanX = local.scroll.speedX != 0.0f ? float(ctx->width) + local.scroll.gap : 0.0f;
-			const float spanY = local.scroll.speedY != 0.0f ? float(ctx->height) + local.scroll.gap
-									: 0.0f;
+			const float spanY = local.scroll.speedY != 0.0f ? float(ctx->height) + local.scroll.gap : 0.0f;
 
 			gs_matrix_push();
 			gs_matrix_translate3f(ctx->scrollX - std::copysign(spanX, local.scroll.speedX),

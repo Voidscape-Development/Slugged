@@ -482,8 +482,7 @@ obs_properties_t *properties(void *sourceData)
 	// The editor is the headline way to author a Slugged source; the flat
 	// properties below stay available so the source is still fully usable from
 	// the standard dialog, from scripts, and from obs-websocket.
-	obs_properties_add_button2(props, "open_editor", obs_module_text("OpenEditor"), openEditorClicked,
-				   sourceData);
+	obs_properties_add_button2(props, "open_editor", obs_module_text("OpenEditor"), openEditorClicked, sourceData);
 
 	// One-click adoption of an existing GDI+ or FreeType2 text source, so
 	// switching an overlay over does not mean rebuilding every text element.
@@ -492,11 +491,10 @@ obs_properties_t *properties(void *sourceData)
 
 	migrate::fillImportList(importList);
 
-	obs_properties_add_button2(props, "import_apply", obs_module_text("Import.Apply"), importClicked,
-				   sourceData);
+	obs_properties_add_button2(props, "import_apply", obs_module_text("Import.Apply"), importClicked, sourceData);
 
 	obs_property_t *mode = obs_properties_add_list(props, "mode", obs_module_text("Mode"), OBS_COMBO_TYPE_LIST,
-						      OBS_COMBO_FORMAT_INT);
+						       OBS_COMBO_FORMAT_INT);
 
 	obs_property_list_add_int(mode, obs_module_text("Mode.Document"), 0);
 	obs_property_list_add_int(mode, obs_module_text("Mode.File"), 1);
@@ -504,8 +502,8 @@ obs_properties_t *properties(void *sourceData)
 
 	obs_properties_add_text(props, "text", obs_module_text("Text"), OBS_TEXT_MULTILINE);
 
-	obs_properties_add_path(props, "file", obs_module_text("File"), OBS_PATH_FILE,
-				obs_module_text("File.Filter"), nullptr);
+	obs_properties_add_path(props, "file", obs_module_text("File"), OBS_PATH_FILE, obs_module_text("File.Filter"),
+				nullptr);
 
 	obs_properties_add_bool(props, "chatlog", obs_module_text("Chatlog"));
 	obs_properties_add_int(props, "chatlog_lines", obs_module_text("Chatlog.Lines"), 1, 1000, 1);
@@ -522,7 +520,7 @@ obs_properties_t *properties(void *sourceData)
 	obs_properties_add_bool(props, "shadow", obs_module_text("Shadow"));
 
 	obs_property_t *align = obs_properties_add_list(props, "align", obs_module_text("Align"), OBS_COMBO_TYPE_LIST,
-						       OBS_COMBO_FORMAT_INT);
+							OBS_COMBO_FORMAT_INT);
 
 	obs_property_list_add_int(align, obs_module_text("Align.Left"), int(HAlign::Left));
 	obs_property_list_add_int(align, obs_module_text("Align.Center"), int(HAlign::Center));
@@ -530,7 +528,7 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(align, obs_module_text("Align.Justify"), int(HAlign::Justify));
 
 	obs_property_t *valign = obs_properties_add_list(props, "valign", obs_module_text("VAlign"),
-							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Top"), int(VAlign::Top));
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Middle"), int(VAlign::Middle));
@@ -546,7 +544,7 @@ obs_properties_t *properties(void *sourceData)
 	obs_properties_add_int(props, "extents_cy", obs_module_text("Extents.Height"), 1, 16384, 1);
 
 	obs_property_t *wrap = obs_properties_add_list(props, "wrap", obs_module_text("Wrap"), OBS_COMBO_TYPE_LIST,
-						      OBS_COMBO_FORMAT_INT);
+						       OBS_COMBO_FORMAT_INT);
 
 	obs_property_list_add_int(wrap, obs_module_text("Wrap.None"), int(WrapMode::None));
 	obs_property_list_add_int(wrap, obs_module_text("Wrap.Word"), int(WrapMode::Word));
@@ -623,7 +621,9 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 	// This is what lets the flat dialog and the editor coexist: without it,
 	// every update() would overwrite per-run styling with the dialog's single
 	// global style.
-	auto changed = [&](bool differs) { return first || differs; };
+	auto changed = [&](bool differs) {
+		return first || differs;
+	};
 
 	if (doc.blocks.empty())
 		doc.setPlainText(current.text);
@@ -689,8 +689,7 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 	if (changed(current.valign != snapshot.valign))
 		doc.valign = VAlign(current.valign);
 
-	if (changed(current.background != snapshot.background ||
-		    current.backgroundColor != snapshot.backgroundColor)) {
+	if (changed(current.background != snapshot.background || current.backgroundColor != snapshot.backgroundColor)) {
 		doc.backgroundEnabled = current.background;
 		doc.backgroundColor = Rgba::fromObsColor(current.backgroundColor);
 	}

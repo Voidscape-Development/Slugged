@@ -66,8 +66,8 @@ void ColorButton::pick()
 
 	initial.setRgbF(qreal(_color.r), qreal(_color.g), qreal(_color.b), qreal(_color.a));
 
-	const QColor chosen = QColorDialog::getColor(initial, this, tr("Select colour"),
-						     QColorDialog::ShowAlphaChannel);
+	const QColor chosen =
+		QColorDialog::getColor(initial, this, tr("Select colour"), QColorDialog::ShowAlphaChannel);
 
 	if (!chosen.isValid())
 		return;

@@ -82,11 +82,7 @@ static float tagValue(const FT_Var_Axis &axis)
 static std::string tagToString(FT_ULong tag)
 {
 	char buf[5] = {
-		char((tag >> 24) & 0xFF),
-		char((tag >> 16) & 0xFF),
-		char((tag >> 8) & 0xFF),
-		char(tag & 0xFF),
-		0,
+		char((tag >> 24) & 0xFF), char((tag >> 16) & 0xFF), char((tag >> 8) & 0xFF), char(tag & 0xFF), 0,
 	};
 
 	return std::string(buf);

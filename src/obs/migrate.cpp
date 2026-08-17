@@ -254,8 +254,7 @@ bool importInto(obs_data_t *targetSettings, const char *legacySourceName)
 		obs_data_t *legacySettings = obs_source_get_settings(legacy);
 
 		if (legacySettings) {
-			const bool freetype =
-				std::strcmp(id, kFreeType) == 0 || std::strcmp(id, kFreeTypeV2) == 0;
+			const bool freetype = std::strcmp(id, kFreeType) == 0 || std::strcmp(id, kFreeTypeV2) == 0;
 
 			if (freetype)
 				importFreeType(legacySettings, targetSettings);

@@ -352,9 +352,8 @@ std::vector<ShapedGlyph> Shaper::shape(const std::vector<ShapeRun> &runs, Direct
 		hb_buffer_set_script(buffer, item.script);
 
 		if (!run->style->language.empty())
-			hb_buffer_set_language(
-				buffer, hb_language_from_string(run->style->language.c_str(),
-								int(run->style->language.size())));
+			hb_buffer_set_language(buffer, hb_language_from_string(run->style->language.c_str(),
+									       int(run->style->language.size())));
 		else
 			hb_buffer_set_language(buffer, hb_language_get_default());
 

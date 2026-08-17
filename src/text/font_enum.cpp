@@ -109,8 +109,7 @@ bool fileOf(IDWriteFont *font, FontFileRef &out)
 		UINT32 keySize = 0;
 		ComPtr<IDWriteFontFileLoader> loader;
 
-		if (SUCCEEDED(files[0]->GetReferenceKey(&key, &keySize)) &&
-		    SUCCEEDED(files[0]->GetLoader(&loader))) {
+		if (SUCCEEDED(files[0]->GetReferenceKey(&key, &keySize)) && SUCCEEDED(files[0]->GetLoader(&loader))) {
 			ComPtr<IDWriteLocalFontFileLoader> local;
 
 			if (SUCCEEDED(loader.As(&local))) {
@@ -377,8 +376,8 @@ bool match(const std::string &family, int weight, bool italic, FontFileRef &out)
 	// CoreText's weight axis is -1..1 rather than 100..900; 400 maps to 0.
 	const float ctWeight = (float(weight) - 400.0f) / 500.0f;
 
-	CFMutableDictionaryRef traits = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
-								  &kCFTypeDictionaryValueCallBacks);
+	CFMutableDictionaryRef traits = CFDictionaryCreateMutable(
+		kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	CFNumberRef weightNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &ctWeight);
 	CFDictionarySetValue(traits, kCTFontWeightTrait, weightNum);
 

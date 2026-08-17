@@ -146,7 +146,7 @@ bool AtlasCache::addOutline(const Request &req)
 	// The colour passed here is irrelevant: geometry.cpp assigns the real
 	// per-glyph colour on the vertices at draw time. Only the shape matters.
 	painter.fill(path, slughorn::Color{1.0f, 1.0f, 1.0f, 1.0f}, 1.0f,
-		    outlineKey(req.slot, req.glyphIndex, req.outlineWidthEm));
+		     outlineKey(req.slot, req.glyphIndex, req.outlineWidthEm));
 
 	return true;
 }
