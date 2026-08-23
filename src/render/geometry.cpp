@@ -111,7 +111,13 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 		out.positions.push_back(px[i]);
 		out.positions.push_back(py[i]);
 		out.positions.push_back(0.0f);
-		out.positions.push_back(0.0f); // vec3 is 16 bytes wide in libobs
+
+		// libobs's struct vec3 is 16 bytes wide, so this fourth float is
+		// part of the vertex stride and reaches the shader as POSITION.w.
+		// It is written as a real homogeneous 1 rather than as padding;
+		// the vertex shader forces it to 1 as well, because libobs's own
+		// geometry leaves this slot at 0.
+		out.positions.push_back(1.0f);
 
 		out.em.push_back(ex[i]);
 		out.em.push_back(ey[i]);

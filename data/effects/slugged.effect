@@ -28,7 +28,10 @@
  *
  * Vertex attribute mapping (see render/geometry.cpp, which fills gs_vb_data):
  *
- *   POSITION   points     glyph quad corner, source-space pixels
+ *   POSITION   points     .xyz glyph quad corner, source-space pixels; .w is
+ *                         part of libobs's 16-byte vertex stride and is forced
+ *                         to 1 in the vertex shader before the ViewProj
+ *                         transform (see VSSlug)
  *   TEXCOORD0  tvarray[0] .xy em-space coord, .zw [0,1] uv
  *   TEXCOORD1  tvarray[1] band transform (bandScaleX/Y, bandOffsetX/Y)
  *   TEXCOORD2  tvarray[2] shape data (bandTexX/Y, bandMaxX/Y)
@@ -366,7 +369,15 @@ VertOut VSSlug(VertIn v)
 		fade = 1.0;
 	}
 
-	o.pos       = mul(pos, ViewProj);
+	/* The w component has to be forced to 1 here. libobs describes the POSITION
+	 * attribute as a full float4 (struct vec3 is SSE-aligned and 16 bytes wide,
+	 * so the fourth float is part of the stride and is fed to the shader), but
+	 * nothing in libobs ever writes a 1 into it. Transforming a w = 0 position
+	 * by an orthographic ViewProj drops the translation row and yields a clip
+	 * position with w = 0, which every triangle degenerates to -- the source
+	 * reports its size correctly and draws absolutely nothing. Every stock OBS
+	 * effect rebuilds the position the same way for this reason. */
+	o.pos       = mul(float4(pos.xyz, 1.0), ViewProj);
 	o.emCoord   = v.em.xy;
 	o.bandXform = v.bandXform;
 	o.shapeData = v.shapeData;

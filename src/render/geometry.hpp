@@ -34,7 +34,7 @@ namespace slugged {
 // struct vec3 is SSE-aligned and 16 bytes wide, so a packed 3-float array would
 // be misread as garbage.
 struct GeometryBuffers {
-	std::vector<float> positions; // 4 floats/vertex (x, y, z, unused)
+	std::vector<float> positions; // 4 floats/vertex (x, y, z, w)
 	std::vector<float> em;        // 4 floats/vertex
 	std::vector<float> bandXform; // 4
 	std::vector<float> shapeData; // 4
