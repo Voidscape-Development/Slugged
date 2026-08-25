@@ -104,8 +104,6 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 	const float py[4] = {y0, y0, y1, y1};
 	const float ex[4] = {emX0, emX1, emX1, emX0};
 	const float ey[4] = {emY0, emY0, emY1, emY1};
-	const float uvx[4] = {0.0f, 1.0f, 1.0f, 0.0f};
-	const float uvy[4] = {0.0f, 0.0f, 1.0f, 1.0f};
 
 	for (int i = 0; i < 4; i++) {
 		out.positions.push_back(px[i]);
@@ -121,8 +119,11 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 
 		out.em.push_back(ex[i]);
 		out.em.push_back(ey[i]);
-		out.em.push_back(uvx[i]);
-		out.em.push_back(uvy[i]);
+
+		// Solid flag: 0 means "solve coverage from the em coordinate", which
+		// is every glyph quad. Decoration bars set it to 1.
+		out.em.push_back(0.0f);
+		out.em.push_back(0.0f);
 
 		out.bandXform.push_back(float(s.bandScaleX));
 		out.bandXform.push_back(float(s.bandScaleY));
@@ -158,18 +159,82 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 	out.indices.push_back(base + 3);
 }
 
-// Which unit of the text this glyph's animation delay is counted in.
-float staggerIndex(const PositionedGlyph &g, MotionOrder order)
+// Emits a plain filled rectangle for an underline or strikeout bar.
+//
+// It goes into the same buffers as the glyph quads so it animates through the
+// same vertex shader and needs no second draw call; the solid flag in the em
+// attribute is what tells the pixel shader to skip the coverage solve. `x0`/`y0`
+// is the top-left corner and `x1`/`y1` the bottom-right.
+void emitRect(const QuadParams &p, float x0, float y0, float x1, float y1, GeometryBuffers &out)
+{
+	if (x1 <= x0 || y1 <= y0)
+		return;
+
+	const float pivotX = (x0 + x1) * 0.5f;
+	const float pivotY = (y0 + y1) * 0.5f;
+
+	const uint32_t base = uint32_t(out.vertexCount());
+
+	const float px[4] = {x0, x1, x1, x0};
+	const float py[4] = {y0, y0, y1, y1};
+
+	for (int i = 0; i < 4; i++) {
+		out.positions.push_back(px[i]);
+		out.positions.push_back(py[i]);
+		out.positions.push_back(0.0f);
+		out.positions.push_back(1.0f);
+
+		out.em.push_back(0.0f);
+		out.em.push_back(0.0f);
+		out.em.push_back(1.0f); // solid
+		out.em.push_back(0.0f);
+
+		// No shape, so the band lookup is never reached; zeros keep the
+		// attribute arrays the same width for every vertex.
+		for (int k = 0; k < 4; k++)
+			out.bandXform.push_back(0.0f);
+
+		for (int k = 0; k < 4; k++)
+			out.shapeData.push_back(0.0f);
+
+		out.color.push_back(p.color.r);
+		out.color.push_back(p.color.g);
+		out.color.push_back(p.color.b);
+		out.color.push_back(p.color.a);
+
+		out.fx.push_back(p.motionMode);
+		out.fx.push_back(p.motionParam);
+		out.fx.push_back(p.startTime);
+		out.fx.push_back(p.duration);
+
+		out.pivot.push_back(pivotX);
+		out.pivot.push_back(pivotY);
+		out.pivot.push_back(p.ordinal);
+		out.pivot.push_back(p.glyphCount);
+	}
+
+	out.indices.push_back(base + 0);
+	out.indices.push_back(base + 1);
+	out.indices.push_back(base + 2);
+	out.indices.push_back(base + 0);
+	out.indices.push_back(base + 2);
+	out.indices.push_back(base + 3);
+}
+
+// Which unit of the text an animation delay is counted in. Decoration bars pass
+// the indices of the first glyph they cover, so a bar animates in step with its
+// own text rather than with the start of the document.
+float staggerIndex(uint32_t ordinal, uint32_t wordIndex, uint32_t lineIndex, MotionOrder order)
 {
 	switch (order) {
 	case MotionOrder::Together:
 		return 0.0f;
 	case MotionOrder::PerGlyph:
-		return float(g.ordinal);
+		return float(ordinal);
 	case MotionOrder::PerWord:
-		return float(g.wordIndex);
+		return float(wordIndex);
 	case MotionOrder::PerLine:
-		return float(g.lineIndex);
+		return float(lineIndex);
 	}
 
 	return 0.0f;
@@ -236,8 +301,10 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 
 		const Style &style = *g.style;
 
-		const float startTime = motion.motion == Motion::None ? 0.0f
-								      : staggerIndex(g, motion.order) * motion.stagger;
+		const float startTime =
+			motion.motion == Motion::None
+				? 0.0f
+				: staggerIndex(g.ordinal, g.wordIndex, g.lineIndex, motion.order) * motion.stagger;
 
 		QuadParams params;
 
@@ -314,6 +381,77 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 				emitQuad(fill, out);
 			}
 		}
+	}
+
+	// ---- underline and strikeout bars ------------------------------------
+	//
+	// Emitted after every glyph so they draw on top, which is what puts a
+	// strikeout across the letters rather than behind them. A bar carries the
+	// motion parameters of the first glyph it covers, so it animates in step
+	// with its own text rather than with the start of the document.
+	auto decorationParams = [&](const DecorationRect &d) {
+		QuadParams params;
+
+		params.motionMode = float(int(motion.motion));
+		params.motionParam = motion.param;
+		params.startTime =
+			motion.motion == Motion::None
+				? 0.0f
+				: staggerIndex(d.ordinal, d.wordIndex, d.lineIndex, motion.order) * motion.stagger;
+		params.duration = std::max(motion.duration, 1e-4f);
+		params.ordinal = float(d.ordinal);
+		params.glyphCount = glyphCount;
+
+		return params;
+	};
+
+	auto drawable = [](const DecorationRect &d) {
+		return d.style && d.width > 0.0f && d.height > 0.0f;
+	};
+
+	// Every bar's drop shadow goes down before any bar, so a shadow never lands
+	// on top of a neighbouring run's bar. Same back-to-front reasoning as the
+	// glyph quads above.
+	for (const DecorationRect &d : layout.decorations) {
+		if (!drawable(d) || !d.style->shadow.enabled)
+			continue;
+
+		const Shadow &shadow = d.style->shadow;
+
+		QuadParams params = decorationParams(d);
+
+		params.color = shadow.color;
+
+		emitRect(params, d.x + shadow.offsetX, d.y + shadow.offsetY, d.x + d.width + shadow.offsetX,
+			 d.y + d.height + shadow.offsetY, out);
+	}
+
+	for (const DecorationRect &d : layout.decorations) {
+		if (!drawable(d))
+			continue;
+
+		const Fill &fill = d.style->fill;
+
+		// A bar spans many glyphs, so it samples the gradient at its own
+		// midpoint rather than at any one glyph's position.
+		float t = 0.0f;
+
+		if (fill.type != Fill::Type::Solid) {
+			if (fill.perGlyph) {
+				t = glyphCount > 1.0f ? float(d.ordinal) / (glyphCount - 1.0f) : 0.0f;
+			} else {
+				const float rad = fill.angleDeg * 3.14159265f / 180.0f;
+				const float midX = d.x + d.width * 0.5f;
+
+				t = (midX / spanX) * std::cos(rad) + (d.y / spanY) * std::sin(rad);
+			}
+		}
+
+		QuadParams params = decorationParams(d);
+
+		params.color = sampleFill(fill, t);
+
+		emitRect(params, d.x, d.y, d.x + d.width, d.y + d.height, out);
 	}
 
 	return !out.empty();

@@ -35,7 +35,7 @@ namespace slugged {
 // be misread as garbage.
 struct GeometryBuffers {
 	std::vector<float> positions; // 4 floats/vertex (x, y, z, w)
-	std::vector<float> em;        // 4 floats/vertex
+	std::vector<float> em;        // 4: emX, emY, solid flag, unused
 	std::vector<float> bandXform; // 4
 	std::vector<float> shapeData; // 4
 	std::vector<float> color;     // 4
@@ -65,7 +65,9 @@ struct GeometryBuffers {
 //
 // Each glyph can contribute up to three quads, emitted back to front so plain
 // alpha blending gives the right result without depth or sorting: drop shadow,
-// then outline, then fill.
+// then outline, then fill. Underline and strikeout bars are emitted last, on
+// top of the text, as solid quads that carry no glyph shape -- the shader tells
+// the two apart by the flag in the em attribute.
 class GeometryBuilder {
 public:
 	// `atlas` must already contain every shape `glyphs` refers to; AtlasCache

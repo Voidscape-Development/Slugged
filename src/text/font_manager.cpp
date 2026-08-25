@@ -169,6 +169,18 @@ FontFace *FontManager::openFace(const std::string &path, int faceIndex, const Fo
 	if (face->underlineThickness <= 0.0f)
 		face->underlineThickness = 0.05f;
 
+	// The strikeout bar lives in OS/2, which only TrueType/OpenType faces carry.
+	// Where it is missing the defaults on FontFace put the bar at a quarter of
+	// an em, which is close enough to the x-height middle for the faces that
+	// lack the table (mostly bitmap and Type 1).
+	if (const auto *os2 = static_cast<const TT_OS2 *>(FT_Get_Sfnt_Table(face->ft, FT_SFNT_OS2))) {
+		// version 0xFFFF marks a synthesised table with no usable values.
+		if (os2->version != 0xFFFF && os2->yStrikeoutSize > 0) {
+			face->strikeoutPos = float(os2->yStrikeoutPosition) * inv;
+			face->strikeoutThickness = float(os2->yStrikeoutSize) * inv;
+		}
+	}
+
 	face->hasColor = FT_HAS_COLOR(face->ft) != 0;
 	face->variable = FT_HAS_MULTIPLE_MASTERS(face->ft) != 0;
 

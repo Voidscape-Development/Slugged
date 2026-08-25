@@ -117,6 +117,11 @@ void SluggedSource::rebuild()
 			g.x += local.padding;
 			g.y += local.padding;
 		}
+
+		for (DecorationRect &d : layout.decorations) {
+			d.x += local.padding;
+			d.y += local.padding;
+		}
 	}
 
 	if (GeometryBuilder::build(local, layout, atlas, geometry))

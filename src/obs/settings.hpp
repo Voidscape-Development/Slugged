@@ -39,6 +39,12 @@ namespace slugged {
 // document when that property actually changed, which is what SettingsSnapshot
 // tracks. Without it, every update() would flatten per-run styling the editor
 // had applied.
+//
+// The flat mirror is lossy -- it can only describe one style for the whole
+// source -- so the document wins whenever it is the thing that just changed.
+// `documentRevision` is what makes that decidable: save() bumps it, and an
+// update carrying a revision the snapshot has not seen is one where the
+// document is authoritative and the flat properties are only a readout of it.
 namespace settings {
 
 // Values of the flat properties as of the last update, so the next update can
@@ -48,12 +54,16 @@ struct SettingsSnapshot {
 	std::string fontFace;
 	std::string fontStyle;
 	int fontSize = 64;
+	uint32_t fontFlags = 0;
 	uint32_t color = 0xFFFFFFFF;
 	int opacity = 100;
 	bool outline = false;
 	int outlineSize = 2;
 	uint32_t outlineColor = 0xFF000000;
 	bool shadow = false;
+	double shadowX = 2.0;
+	double shadowY = 2.0;
+	uint32_t shadowColor = 0x80000000;
 	int align = 0;
 	int valign = 0;
 	bool background = false;
@@ -63,8 +73,14 @@ struct SettingsSnapshot {
 	int extentsHeight = 200;
 	int wrap = 1;
 
+	int64_t documentRevision = 0;
+
 	bool valid = false;
 };
+
+// The settings key holding the counter described above. The editor bumps it
+// through save(); nothing else should write it.
+extern const char *const kDocumentRevisionKey;
 
 void defaults(obs_data_t *data);
 
