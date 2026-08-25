@@ -55,6 +55,26 @@ struct PositionedGlyph {
 	bool rtl = false;
 };
 
+// An underline or strikeout bar, in the same pixel space as PositionedGlyph.
+//
+// Decorations are spans rather than per-glyph marks: a run of underlined text
+// produces one rectangle covering the whole run, including the spaces inside
+// it, which is what makes the rule continuous.
+struct DecorationRect {
+	float x = 0.0f;
+	float y = 0.0f; // top edge
+	float width = 0.0f;
+	float height = 0.0f;
+
+	const Style *style = nullptr;
+
+	// Copied from the first glyph of the span so the bar animates in step with
+	// the text it belongs to.
+	uint32_t lineIndex = 0;
+	uint32_t wordIndex = 0;
+	uint32_t ordinal = 0;
+};
+
 struct LineInfo {
 	float baselineY = 0.0f;
 	float width = 0.0f;
@@ -68,6 +88,7 @@ struct LineInfo {
 struct LayoutResult {
 	std::vector<PositionedGlyph> glyphs;
 	std::vector<LineInfo> lines;
+	std::vector<DecorationRect> decorations;
 
 	// Tight bounds of the laid-out text, excluding padding.
 	float width = 0.0f;

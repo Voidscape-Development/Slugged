@@ -144,9 +144,31 @@ void EditorWindow::reload()
 	if (data) {
 		obs_data_t *documentData = obs_data_get_obj(data, "document");
 
+		bool loaded = false;
+
 		if (documentData) {
 			settings::documentFromData(documentData, _document);
 			obs_data_release(documentData);
+
+			loaded = !_document.empty();
+		}
+
+		if (!loaded) {
+			// A source that has only ever been configured from the
+			// properties dialog carries no stored document, or an empty
+			// one -- that key is written by this editor and by nothing
+			// else. Building a document from the flat properties is
+			// exactly what the source itself does on update, so the editor
+			// opens showing what the scene is already rendering.
+			//
+			// Without this the editor came up empty and the first edit
+			// pushed that emptiness back through the flat `text` mirror,
+			// blanking a source that had been showing text a moment before.
+			_document = Document();
+
+			settings::SettingsSnapshot fresh;
+
+			settings::load(data, _document, fresh);
 		}
 
 		obs_data_release(data);
@@ -342,10 +364,20 @@ QWidget *EditorWindow::buildFontPanel()
 
 	connect(_fontItalic, &QCheckBox::toggled, this, &EditorWindow::onStyleChanged);
 
+	_fontUnderline = new QCheckBox(tr_("Editor.Underline"), panel);
+
+	connect(_fontUnderline, &QCheckBox::toggled, this, &EditorWindow::onStyleChanged);
+
+	_fontStrikeout = new QCheckBox(tr_("Editor.Strikeout"), panel);
+
+	connect(_fontStrikeout, &QCheckBox::toggled, this, &EditorWindow::onStyleChanged);
+
 	form->addRow(tr_("Editor.Family"), _fontFamily);
 	form->addRow(tr_("Editor.Size"), _fontSize);
 	form->addRow(tr_("Editor.Weight"), _fontWeight);
 	form->addRow(QString(), _fontItalic);
+	form->addRow(QString(), _fontUnderline);
+	form->addRow(QString(), _fontStrikeout);
 
 	outer->addLayout(form);
 
@@ -516,6 +548,14 @@ QWidget *EditorWindow::buildLayoutPanel()
 	_lineHeight->setSingleStep(0.05);
 	connect(_lineHeight, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onLayoutChanged);
 
+	// Whole-source opacity, the same value the flat Opacity property drives. It
+	// multiplies the fill, outline and shadow together in the shader, which is
+	// what the per-element colour alphas cannot do on their own.
+	_opacity = new QSpinBox(panel);
+	_opacity->setRange(0, 100);
+	_opacity->setSuffix(" %");
+	connect(_opacity, &QSpinBox::valueChanged, this, &EditorWindow::onLayoutChanged);
+
 	_background = new QCheckBox(tr_("Editor.Enabled"), panel);
 	connect(_background, &QCheckBox::toggled, this, &EditorWindow::onLayoutChanged);
 
@@ -530,6 +570,7 @@ QWidget *EditorWindow::buildLayoutPanel()
 	form->addRow(tr_("Extents.Height"), _boxHeight);
 	form->addRow(tr_("Editor.Padding"), _padding);
 	form->addRow(tr_("Editor.LineHeight"), _lineHeight);
+	form->addRow(tr_("Opacity"), _opacity);
 	form->addRow(tr_("Background"), _background);
 	form->addRow(tr_("Background.Color"), _backgroundColor);
 
@@ -677,6 +718,8 @@ void EditorWindow::onStyleChanged()
 	const int size = _fontSize->value();
 	const int weight = indexToWeight(_fontWeight->currentIndex());
 	const bool italic = _fontItalic->isChecked();
+	const bool underline = _fontUnderline->isChecked();
+	const bool strikeout = _fontStrikeout->isChecked();
 
 	const auto fillType = Fill::Type(_fillType->currentData().toInt());
 	const Rgba fillColor = _fillColor->color();
@@ -700,6 +743,8 @@ void EditorWindow::onStyleChanged()
 		style.sizePx = float(size);
 		style.font.weight = weight;
 		style.font.italic = italic;
+		style.underline = underline;
+		style.strikeout = strikeout;
 
 		style.fill.type = fillType;
 		style.fill.color = fillColor;
@@ -743,6 +788,7 @@ void EditorWindow::onLayoutChanged()
 	_document.boxWidth = float(_boxWidth->value());
 	_document.boxHeight = float(_boxHeight->value());
 	_document.padding = float(_padding->value());
+	_document.opacity = float(_opacity->value()) / 100.0f;
 	_document.backgroundEnabled = _background->isChecked();
 	_document.backgroundColor = _backgroundColor->color();
 
@@ -791,6 +837,8 @@ void EditorWindow::syncControls()
 	_fontSize->setValue(int(style.sizePx));
 	_fontWeight->setCurrentIndex(weightToIndex(style.font.weight));
 	_fontItalic->setChecked(style.font.italic);
+	_fontUnderline->setChecked(style.underline);
+	_fontStrikeout->setChecked(style.strikeout);
 
 	_fillType->setCurrentIndex(_fillType->findData(int(style.fill.type)));
 	_fillColor->setColor(style.fill.color);
@@ -821,6 +869,7 @@ void EditorWindow::syncControls()
 	_boxWidth->setValue(int(_document.boxWidth));
 	_boxHeight->setValue(int(_document.boxHeight));
 	_padding->setValue(double(_document.padding));
+	_opacity->setValue(std::clamp(int(_document.opacity * 100.0f + 0.5f), 0, 100));
 	_background->setChecked(_document.backgroundEnabled);
 	_backgroundColor->setColor(_document.backgroundColor);
 

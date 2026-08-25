@@ -67,6 +67,11 @@ struct FontFace {
 	float underlinePos = -0.1f;
 	float underlineThickness = 0.05f;
 
+	// Strikeout bar, from the face's OS/2 table where it has one. Positive is
+	// above the baseline, matching FreeType's y-up sign convention.
+	float strikeoutPos = 0.25f;
+	float strikeoutThickness = 0.05f;
+
 	// True when the face carries COLR/CPAL colour layers.
 	bool hasColor = false;
 

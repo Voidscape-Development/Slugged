@@ -126,9 +126,9 @@ struct Document {
 		for (const Block &b : blocks)
 			for (const Run &r : b.runs)
 				if (!r.text.empty())
-					return true;
+					return false;
 
-		return false;
+		return true;
 	}
 
 	// Every distinct style in document order; used by the atlas cache to decide

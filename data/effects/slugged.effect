@@ -32,7 +32,10 @@
  *                         part of libobs's 16-byte vertex stride and is forced
  *                         to 1 in the vertex shader before the ViewProj
  *                         transform (see VSSlug)
- *   TEXCOORD0  tvarray[0] .xy em-space coord, .zw [0,1] uv
+ *   TEXCOORD0  tvarray[0] .xy em-space coord, .z solid flag, .w unused
+ *                         A solid flag of 1 marks a quad that carries no glyph
+ *                         shape -- an underline or strikeout bar -- so the
+ *                         pixel shader fills it instead of solving coverage.
  *   TEXCOORD1  tvarray[1] band transform (bandScaleX/Y, bandOffsetX/Y)
  *   TEXCOORD2  tvarray[2] shape data (bandTexX/Y, bandMaxX/Y)
  *   TEXCOORD3  tvarray[3] fill colour, straight alpha
@@ -90,6 +93,7 @@ struct VertOut {
 	float4 shapeData : TEXCOORD2;
 	float4 color     : TEXCOORD3;
 	float  fade      : TEXCOORD4;
+	float  solid     : TEXCOORD5;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -383,12 +387,25 @@ VertOut VSSlug(VertIn v)
 	o.shapeData = v.shapeData;
 	o.color     = v.color;
 	o.fade      = fade;
+	o.solid     = v.em.z;
 
 	return o;
 }
 
 float4 PSSlug(VertOut f) : TARGET
 {
+	/* Underline and strikeout bars carry no curves, so they are filled outright
+	 * instead of being run through the coverage solve, whose band fetches would
+	 * otherwise read whatever the atlas happens to hold at texel 0.
+	 *
+	 * The flag is constant across a whole quad, so every fragment of a
+	 * primitive takes the same path -- this branch never splits a derivative
+	 * quad, which is what would make the fwidth() inside slug_Render undefined.
+	 * It returns rather than selecting a value so that a flattening compiler
+	 * cannot fold the discarded branch's arithmetic into the result. */
+	if (f.solid > 0.5)
+		return float4(f.color.rgb, f.color.a * f.fade * opacity);
+
 	float fill = slug_Render(f.emCoord, f.bandXform, f.shapeData.xy, f.shapeData.zw);
 
 	/* Coverage is folded into alpha rather than discarded, so glyphs stay

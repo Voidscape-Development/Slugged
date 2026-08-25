@@ -11,10 +11,11 @@ happens to be. Text stays exact at any scale, in the preview and on stream.
 ## What it adds
 
 Everything the GDI+ text source does — font, colour, opacity, outline, drop shadow, background,
-alignment, fixed extents with word wrap, read-from-file, chat log mode — plus:
+alignment, underline and strikeout, fixed extents with word wrap, read-from-file, chat log mode —
+plus:
 
-- **Per-character styling.** Font, size, weight, colour, outline and spacing can vary within one
-  source instead of applying to the whole block.
+- **Per-character styling.** Font, size, weight, colour, outline, underline, strikeout and spacing
+  can vary within one source instead of applying to the whole block.
 - **Real text shaping.** HarfBuzz for ligatures, kerning and complex scripts, SheenBidi for
   right-to-left and mixed-direction text, and automatic font fallback for characters the chosen font
   lacks.
@@ -37,6 +38,13 @@ applies immediately.
 The standard properties dialog stays fully functional for everything that does not need
 per-character control, and the plain `text` property is kept in sync — so obs-websocket, Lua and
 Python scripts, and tools like Streamer.bot drive a Slugged source exactly as they drive a GDI+ one.
+
+The two surfaces do not fight over the source. A property from the dialog is written into the
+document only when it actually changes, and an edit made in the editor is never diffed back through
+the dialog's single-style mirror — so styling one word in the editor stays on that word, and a saved
+scene collection reopens with its per-character styling intact. **Opacity** in the dialog is a
+whole-source multiplier applied in the shader: it fades the fill, outline and drop shadow together,
+while the alpha channel in each colour picker still controls that element on its own.
 
 ## Migrating
 

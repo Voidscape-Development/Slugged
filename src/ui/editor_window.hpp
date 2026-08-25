@@ -111,6 +111,8 @@ private:
 	QSpinBox *_fontSize = nullptr;
 	QComboBox *_fontWeight = nullptr;
 	QCheckBox *_fontItalic = nullptr;
+	QCheckBox *_fontUnderline = nullptr;
+	QCheckBox *_fontStrikeout = nullptr;
 	QFormLayout *_axisLayout = nullptr;
 	std::map<std::string, QSlider *> _axisSliders;
 
@@ -140,6 +142,7 @@ private:
 	QSpinBox *_boxWidth = nullptr;
 	QSpinBox *_boxHeight = nullptr;
 	QDoubleSpinBox *_padding = nullptr;
+	QSpinBox *_opacity = nullptr;
 	QCheckBox *_background = nullptr;
 	ColorButton *_backgroundColor = nullptr;
 

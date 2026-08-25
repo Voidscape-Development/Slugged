@@ -20,17 +20,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "editor_bridge.hpp"
 #include "migrate.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace slugged {
 namespace settings {
+
+const char *const kDocumentRevisionKey = "document_revision";
 
 namespace {
 
 const char *kDocumentKey = "document";
-
-Rgba colorWithOpacity(uint32_t abgr, int opacityPercent)
-{
-	return Rgba::fromObsColor(abgr, float(opacityPercent) / 100.0f);
-}
 
 // ---- style <-> obs_data ---------------------------------------------------
 
@@ -133,6 +133,9 @@ obs_data_t *styleToData(const Style &style)
 	obs_data_set_double(data, "word_spacing", style.wordSpacing);
 	obs_data_set_string(data, "language", style.language.c_str());
 
+	obs_data_set_bool(data, "underline", style.underline);
+	obs_data_set_bool(data, "strikeout", style.strikeout);
+
 	return data;
 }
 
@@ -183,6 +186,9 @@ void styleFromData(obs_data_t *data, Style &style)
 	style.letterSpacing = float(obs_data_get_double(data, "letter_spacing"));
 	style.wordSpacing = float(obs_data_get_double(data, "word_spacing"));
 	style.language = obs_data_get_string(data, "language");
+
+	style.underline = obs_data_get_bool(data, "underline");
+	style.strikeout = obs_data_get_bool(data, "strikeout");
 }
 
 } // namespace
@@ -348,10 +354,11 @@ void documentFromData(obs_data_t *data, Document &doc)
 	doc.scroll.loop = obs_data_get_bool(data, "scroll_loop");
 	doc.scroll.gap = float(obs_data_get_double(data, "scroll_gap"));
 
-	doc.opacity = float(obs_data_get_double(data, "opacity"));
-
-	if (doc.opacity <= 0.0f)
-		doc.opacity = 1.0f;
+	// Fully transparent is a legitimate setting, so a missing key -- a document
+	// written before opacity was stored -- is what falls back to opaque, not a
+	// stored zero.
+	doc.opacity = obs_data_has_user_value(data, "opacity") ? float(obs_data_get_double(data, "opacity")) : 1.0f;
+	doc.opacity = std::clamp(doc.opacity, 0.0f, 1.0f);
 
 	if (doc.motion.duration <= 0.0f)
 		doc.motion.duration = 0.35f;
@@ -379,6 +386,9 @@ void defaults(obs_data_t *data)
 	obs_data_set_default_int(data, "outline_color", 0xFF000000);
 
 	obs_data_set_default_bool(data, "shadow", false);
+	obs_data_set_default_double(data, "shadow_x", 2.0);
+	obs_data_set_default_double(data, "shadow_y", 2.0);
+	obs_data_set_default_int(data, "shadow_color", 0x80000000);
 
 	obs_data_set_default_int(data, "align", 0);
 	obs_data_set_default_int(data, "valign", 0);
@@ -427,6 +437,67 @@ bool extentsChanged(obs_properties_t *props, obs_property_t *property, obs_data_
 	obs_property_set_visible(obs_properties_get(props, "extents_cy"), fixed);
 	obs_property_set_visible(obs_properties_get(props, "wrap"), fixed);
 	obs_property_set_visible(obs_properties_get(props, "valign"), fixed);
+
+	return true;
+}
+
+bool shadowChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+
+	const bool shadow = obs_data_get_bool(settings, "shadow");
+
+	obs_property_set_visible(obs_properties_get(props, "shadow_x"), shadow);
+	obs_property_set_visible(obs_properties_get(props, "shadow_y"), shadow);
+	obs_property_set_visible(obs_properties_get(props, "shadow_color"), shadow);
+
+	return true;
+}
+
+bool outlineChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+
+	const bool outline = obs_data_get_bool(settings, "outline");
+
+	obs_property_set_visible(obs_properties_get(props, "outline_size"), outline);
+	obs_property_set_visible(obs_properties_get(props, "outline_color"), outline);
+
+	return true;
+}
+
+bool backgroundChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+
+	obs_property_set_visible(obs_properties_get(props, "background_color"),
+				 obs_data_get_bool(settings, "background"));
+
+	return true;
+}
+
+// Each motion preset uses a different subset of the parameters below it, and a
+// control that visibly does nothing is worse than no control at all.
+bool motionChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+
+	const auto motion = Motion(obs_data_get_int(settings, "motion"));
+	const auto order = MotionOrder(obs_data_get_int(settings, "motion_order"));
+
+	const bool animated = motion != Motion::None;
+
+	// Wave never settles, so it has no transition to time or to stagger; it
+	// spreads itself along the text by glyph index in the shader.
+	const bool timed = animated && motion != Motion::Wave;
+
+	// Only the presets that displace or scale have an amount to give.
+	const bool hasAmount = motion == Motion::Slide || motion == Motion::Pop || motion == Motion::Wave;
+
+	obs_property_set_visible(obs_properties_get(props, "motion_order"), timed);
+	obs_property_set_visible(obs_properties_get(props, "motion_duration"), timed);
+	obs_property_set_visible(obs_properties_get(props, "motion_stagger"), timed && order != MotionOrder::Together);
+	obs_property_set_visible(obs_properties_get(props, "motion_param"), hasAmount);
 
 	return true;
 }
@@ -513,11 +584,18 @@ obs_properties_t *properties(void *sourceData)
 	obs_properties_add_color_alpha(props, "color", obs_module_text("Color"));
 	obs_properties_add_int_slider(props, "opacity", obs_module_text("Opacity"), 0, 100, 1);
 
-	obs_properties_add_bool(props, "outline", obs_module_text("Outline"));
+	obs_property_t *outline = obs_properties_add_bool(props, "outline", obs_module_text("Outline"));
+	obs_property_set_modified_callback(outline, outlineChanged);
+
 	obs_properties_add_int(props, "outline_size", obs_module_text("Outline.Size"), 1, 64, 1);
 	obs_properties_add_color_alpha(props, "outline_color", obs_module_text("Outline.Color"));
 
-	obs_properties_add_bool(props, "shadow", obs_module_text("Shadow"));
+	obs_property_t *shadow = obs_properties_add_bool(props, "shadow", obs_module_text("Shadow"));
+	obs_property_set_modified_callback(shadow, shadowChanged);
+
+	obs_properties_add_float(props, "shadow_x", obs_module_text("Shadow.X"), -200.0, 200.0, 1.0);
+	obs_properties_add_float(props, "shadow_y", obs_module_text("Shadow.Y"), -200.0, 200.0, 1.0);
+	obs_properties_add_color_alpha(props, "shadow_color", obs_module_text("Shadow.Color"));
 
 	obs_property_t *align = obs_properties_add_list(props, "align", obs_module_text("Align"), OBS_COMBO_TYPE_LIST,
 							OBS_COMBO_FORMAT_INT);
@@ -534,7 +612,9 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Middle"), int(VAlign::Middle));
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Bottom"), int(VAlign::Bottom));
 
-	obs_properties_add_bool(props, "background", obs_module_text("Background"));
+	obs_property_t *background = obs_properties_add_bool(props, "background", obs_module_text("Background"));
+	obs_property_set_modified_callback(background, backgroundChanged);
+
 	obs_properties_add_color_alpha(props, "background_color", obs_module_text("Background.Color"));
 
 	obs_property_t *extents = obs_properties_add_bool(props, "extents", obs_module_text("Extents"));
@@ -560,6 +640,8 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(motion, obs_module_text("Motion.Typewriter"), int(Motion::Typewriter));
 	obs_property_list_add_int(motion, obs_module_text("Motion.Wave"), int(Motion::Wave));
 
+	obs_property_set_modified_callback(motion, motionChanged);
+
 	obs_property_t *order = obs_properties_add_list(props, "motion_order", obs_module_text("Motion.Order"),
 							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 
@@ -567,6 +649,10 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(order, obs_module_text("Motion.Order.Glyph"), int(MotionOrder::PerGlyph));
 	obs_property_list_add_int(order, obs_module_text("Motion.Order.Word"), int(MotionOrder::PerWord));
 	obs_property_list_add_int(order, obs_module_text("Motion.Order.Line"), int(MotionOrder::PerLine));
+
+	// The order decides whether a stagger delay means anything, so it drives the
+	// same visibility pass as the preset itself.
+	obs_property_set_modified_callback(order, motionChanged);
 
 	obs_properties_add_float(props, "motion_duration", obs_module_text("Motion.Duration"), 0.01, 10.0, 0.01);
 	obs_properties_add_float(props, "motion_stagger", obs_module_text("Motion.Stagger"), 0.0, 2.0, 0.005);
@@ -578,6 +664,8 @@ obs_properties_t *properties(void *sourceData)
 void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 {
 	obs_data_t *documentData = obs_data_get_obj(data, kDocumentKey);
+
+	const bool hasDocument = documentData != nullptr;
 
 	if (documentData) {
 		documentFromData(documentData, doc);
@@ -595,6 +683,7 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 		current.fontFace = obs_data_get_string(font, "face");
 		current.fontStyle = obs_data_get_string(font, "style");
 		current.fontSize = int(obs_data_get_int(font, "size"));
+		current.fontFlags = uint32_t(obs_data_get_int(font, "flags"));
 
 		obs_data_release(font);
 	}
@@ -605,6 +694,9 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 	current.outlineSize = int(obs_data_get_int(data, "outline_size"));
 	current.outlineColor = uint32_t(obs_data_get_int(data, "outline_color"));
 	current.shadow = obs_data_get_bool(data, "shadow");
+	current.shadowX = obs_data_get_double(data, "shadow_x");
+	current.shadowY = obs_data_get_double(data, "shadow_y");
+	current.shadowColor = uint32_t(obs_data_get_int(data, "shadow_color"));
 	current.align = int(obs_data_get_int(data, "align"));
 	current.valign = int(obs_data_get_int(data, "valign"));
 	current.background = obs_data_get_bool(data, "background");
@@ -613,16 +705,35 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 	current.extentsWidth = int(obs_data_get_int(data, "extents_cx"));
 	current.extentsHeight = int(obs_data_get_int(data, "extents_cy"));
 	current.wrap = int(obs_data_get_int(data, "wrap"));
+	current.documentRevision = obs_data_get_int(data, kDocumentRevisionKey);
 	current.valid = true;
 
-	const bool first = !snapshot.valid;
+	// An update carrying a revision the snapshot has not seen came from the
+	// editor, which writes the document and then mirrors the first run's style
+	// into the flat properties. Diffing against that mirror would take a change
+	// the user made to one run and spread it across every run, so the whole
+	// flat-to-document pass is skipped and the snapshot simply catches up.
+	if (snapshot.valid && current.documentRevision != snapshot.documentRevision) {
+		snapshot = current;
+		return;
+	}
 
-	// A property is written into the document only when it actually changed.
-	// This is what lets the flat dialog and the editor coexist: without it,
-	// every update() would overwrite per-run styling with the dialog's single
-	// global style.
+	// Only force every flat property into the document when there is no stored
+	// document to contradict them. Doing it unconditionally on the first update
+	// would flatten the per-run styling of a saved scene collection every time
+	// OBS started, since the flat mirror can only describe one style.
+	//
+	// A stored document with no text in it cannot contradict anything, so it is
+	// treated the same as no document at all -- that is what lets the editor
+	// seed itself from the properties dialog.
+	const bool first = !snapshot.valid && (!hasDocument || doc.empty());
+
+	// After that, a property is written into the document only when it actually
+	// changed. This is what lets the flat dialog and the editor coexist:
+	// without it, every update() would overwrite per-run styling with the
+	// dialog's single global style.
 	auto changed = [&](bool differs) {
-		return first || differs;
+		return first || (snapshot.valid && differs);
 	};
 
 	if (doc.blocks.empty())
@@ -640,33 +751,47 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 	};
 
 	if (changed(current.fontFace != snapshot.fontFace || current.fontStyle != snapshot.fontStyle ||
-		    current.fontSize != snapshot.fontSize)) {
+		    current.fontSize != snapshot.fontSize || current.fontFlags != snapshot.fontFlags)) {
 		forEachStyle([&](Style &style) {
 			style.font.family = current.fontFace;
 			style.sizePx = float(current.fontSize);
 
-			// OBS's font picker reports the style as a display string; the
-			// only parts that matter for shaping are weight and slant.
+			// OBS's font picker reports the chosen face variant twice: as a
+			// display string, and as a flag set. The flags are authoritative
+			// where they are set, but a face whose variant is named only in
+			// the style string ("Semibold", "Oblique") has none of them, so
+			// both are read.
 			const std::string s = current.fontStyle;
+			const uint32_t flags = current.fontFlags;
 
-			style.font.italic = s.find("Italic") != std::string::npos ||
+			style.font.italic = (flags & OBS_FONT_ITALIC) != 0 || s.find("Italic") != std::string::npos ||
 					    s.find("Oblique") != std::string::npos;
 
-			if (s.find("Bold") != std::string::npos)
+			if ((flags & OBS_FONT_BOLD) != 0 || s.find("Bold") != std::string::npos)
 				style.font.weight = 700;
 			else if (s.find("Light") != std::string::npos)
 				style.font.weight = 300;
 			else
 				style.font.weight = 400;
+
+			style.underline = (flags & OBS_FONT_UNDERLINE) != 0;
+			style.strikeout = (flags & OBS_FONT_STRIKEOUT) != 0;
 		});
 	}
 
-	if (changed(current.color != snapshot.color || current.opacity != snapshot.opacity)) {
+	if (changed(current.color != snapshot.color)) {
 		forEachStyle([&](Style &style) {
 			style.fill.type = Fill::Type::Solid;
-			style.fill.color = colorWithOpacity(current.color, current.opacity);
+			style.fill.color = Rgba::fromObsColor(current.color);
 		});
 	}
+
+	// Opacity is a whole-source multiplier rather than a second alpha on the
+	// fill: it is applied in the pixel shader, so it fades the outline and drop
+	// shadow along with the text. The colour picker's own alpha channel stays
+	// the way to make just the fill translucent.
+	if (changed(current.opacity != snapshot.opacity))
+		doc.opacity = std::clamp(float(current.opacity) / 100.0f, 0.0f, 1.0f);
 
 	if (changed(current.outline != snapshot.outline || current.outlineSize != snapshot.outlineSize ||
 		    current.outlineColor != snapshot.outlineColor)) {
@@ -677,8 +802,14 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 		});
 	}
 
-	if (changed(current.shadow != snapshot.shadow)) {
-		forEachStyle([&](Style &style) { style.shadow.enabled = current.shadow; });
+	if (changed(current.shadow != snapshot.shadow || current.shadowX != snapshot.shadowX ||
+		    current.shadowY != snapshot.shadowY || current.shadowColor != snapshot.shadowColor)) {
+		forEachStyle([&](Style &style) {
+			style.shadow.enabled = current.shadow;
+			style.shadow.offsetX = float(current.shadowX);
+			style.shadow.offsetY = float(current.shadowY);
+			style.shadow.color = Rgba::fromObsColor(current.shadowColor);
+		});
 	}
 
 	if (changed(current.align != snapshot.align)) {
@@ -723,8 +854,14 @@ void save(obs_data_t *data, const Document &doc)
 	obs_data_set_obj(data, kDocumentKey, documentData);
 	obs_data_release(documentData);
 
+	// Marks this update as one where the document, not the flat mirror below,
+	// is the thing that changed. load() reads it to know not to diff the mirror
+	// back over the document it just wrote.
+	obs_data_set_int(data, kDocumentRevisionKey, obs_data_get_int(data, kDocumentRevisionKey) + 1);
+
 	// Keep the flat mirror in step so scripts and the properties dialog read
-	// back what the editor produced.
+	// back what the editor produced. It can only carry one style for the whole
+	// source, so it describes the first run.
 	obs_data_set_string(data, "text", doc.plainText().c_str());
 
 	obs_data_set_int(data, "motion", int(doc.motion.motion));
@@ -741,6 +878,22 @@ void save(obs_data_t *data, const Document &doc)
 		obs_data_set_string(font, "face", style.font.family.c_str());
 		obs_data_set_int(font, "size", int(style.sizePx));
 
+		uint32_t flags = 0;
+
+		if (style.font.weight >= 700)
+			flags |= OBS_FONT_BOLD;
+
+		if (style.font.italic)
+			flags |= OBS_FONT_ITALIC;
+
+		if (style.underline)
+			flags |= OBS_FONT_UNDERLINE;
+
+		if (style.strikeout)
+			flags |= OBS_FONT_STRIKEOUT;
+
+		obs_data_set_int(font, "flags", flags);
+
 		obs_data_set_obj(data, "font", font);
 		obs_data_release(font);
 
@@ -749,12 +902,21 @@ void save(obs_data_t *data, const Document &doc)
 		obs_data_set_int(data, "outline_size", int(style.outline.widthPx));
 		obs_data_set_int(data, "outline_color", style.outline.color.toObsColor());
 		obs_data_set_bool(data, "shadow", style.shadow.enabled);
+		obs_data_set_double(data, "shadow_x", style.shadow.offsetX);
+		obs_data_set_double(data, "shadow_y", style.shadow.offsetY);
+		obs_data_set_int(data, "shadow_color", style.shadow.color.toObsColor());
 		obs_data_set_int(data, "align", int(doc.blocks.front().align));
 	}
 
+	obs_data_set_int(data, "opacity", int(std::lround(doc.opacity * 100.0f)));
 	obs_data_set_int(data, "valign", int(doc.valign));
 	obs_data_set_bool(data, "background", doc.backgroundEnabled);
 	obs_data_set_int(data, "background_color", doc.backgroundColor.toObsColor());
+
+	obs_data_set_bool(data, "extents", doc.sizeMode == SizeMode::Fixed);
+	obs_data_set_int(data, "extents_cx", int(doc.boxWidth));
+	obs_data_set_int(data, "extents_cy", int(doc.boxHeight));
+	obs_data_set_int(data, "wrap", int(doc.wrap));
 }
 
 } // namespace settings
