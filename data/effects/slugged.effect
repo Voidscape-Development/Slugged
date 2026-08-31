@@ -39,7 +39,14 @@
  *   TEXCOORD1  tvarray[1] band transform (bandScaleX/Y, bandOffsetX/Y)
  *   TEXCOORD2  tvarray[2] shape data (bandTexX/Y, bandMaxX/Y)
  *   TEXCOORD3  tvarray[3] fill colour, straight alpha
- *   TEXCOORD4  tvarray[4] .x effect id, .y effect param, .z anim phase, .w opacity
+ *   TEXCOORD4  tvarray[4] motion (mode, param, startTime, duration)
+ *   TEXCOORD5  tvarray[5] .xy pivot for the presets that scale or rotate about
+ *                         the glyph's own centre; .z this quad's position in
+ *                         whichever unit the stagger counts in (character, word
+ *                         or line), which is what spreads a continuous preset
+ *                         along the text; .w unused
+ *   TEXCOORD6  tvarray[6] .xy unit vector a displacing preset travels along,
+ *                         .z radians per second for a continuous one, .w unused
  */
 
 uniform float4x4 ViewProj;
@@ -84,6 +91,7 @@ struct VertIn {
 	float4 color     : TEXCOORD3;
 	float4 fx        : TEXCOORD4;
 	float4 pivot     : TEXCOORD5;
+	float4 motion    : TEXCOORD6;
 };
 
 struct VertOut {
@@ -94,6 +102,7 @@ struct VertOut {
 	float4 color     : TEXCOORD3;
 	float  fade      : TEXCOORD4;
 	float  solid     : TEXCOORD5;
+	float  blur      : TEXCOORD6;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -214,7 +223,7 @@ float slug_CalcCoverage(float xcov, float ycov, float xwgt, float ywgt)
 	return clamp(coverage, 0.0, 1.0);
 }
 
-float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, float2 bandMax)
+float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, float2 bandMax, float blurPixels)
 {
 	/* Screen-space derivative of the em coordinate: this is what makes the
 	 * result resolution-independent. Because OBS renders a source with the
@@ -223,6 +232,14 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 	 * new size rather than magnifying a bitmap. */
 	float2 emsPerPixel = fwidth(renderCoord);
 	float2 pixelsPerEm = 1.0 / max(emsPerPixel, 1e-9);
+
+	/* Blur, for MOTION_BLUR. Slug's coverage is an analytic ramp one pixel
+	 * wide, and pixelsPerEm is the only thing that sets that width -- telling
+	 * the solve there are fewer pixels per em spreads the same ramp over
+	 * `blurPixels` of them instead. So this is a real distance-field blur that
+	 * costs one divide, not a multi-tap sample. The quad is grown to match in
+	 * render/geometry.cpp, otherwise the fringe would be clipped square. */
+	pixelsPerEm /= max(blurPixels, 1.0);
 
 	/* O(1) band lookup through the per-axis indirection tables. */
 	float qY = clamp(floor(renderCoord.y * bandTransform.y + bandTransform.w),
@@ -319,8 +336,13 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
  * no geometry rebuild at all. Block-level motion (scrolling, rotation) is a
  * matrix-stack translation on the CPU instead, for the same reason.
  *
- * fx    = (mode, param, startTime, duration)
- * pivot = (pivotX, pivotY, glyphIndex, glyphCount)
+ * `param` means something different per preset -- a distance, a scale, an angle,
+ * a blur width -- which is why the properties dialog relabels and re-ranges its
+ * one control rather than offering the same "Amount" for all of them.
+ *
+ * fx     = (mode, param, startTime, duration)
+ * pivot  = (pivotX, pivotY, staggerIndex, unused)
+ * motion = (dirX, dirY, radiansPerSecond, unused)
  */
 #define MOTION_NONE       0
 #define MOTION_FADE       1
@@ -328,22 +350,41 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 #define MOTION_POP        3
 #define MOTION_TYPEWRITER 4
 #define MOTION_WAVE       5
+#define MOTION_BLUR       6
+#define MOTION_ROTATE     7
+#define MOTION_BOUNCE     8
+
+#define SLUG_DEG_TO_RAD 0.017453292
+
+/* Overshoot easing for MOTION_BOUNCE: the standard back-out curve, which passes
+ * 1 at about 70% of the way through and settles back. The constants are the
+ * conventional 1.70158 / 2.70158 pair. */
+float slug_BackOut(float t)
+{
+	float u = t - 1.0;
+
+	return 1.0 + 2.70158 * u * u * u + 1.70158 * u * u;
+}
 
 VertOut VSSlug(VertIn v)
 {
 	VertOut o;
 
-	float4 pos  = v.pos;
-	float  mode = v.fx.x;
+	float4 pos   = v.pos;
+	float  mode  = v.fx.x;
 	float  param = v.fx.y;
 	float  start = v.fx.z;
 	float  dur   = max(v.fx.w, 1e-4);
+
+	float2 dir   = v.motion.xy;
+	float  omega = v.motion.z;
 
 	/* Linear progress through this glyph's own window, then smoothstep. */
 	float phase = clamp((elapsed - start) / dur, 0.0, 1.0);
 	float eased = phase * phase * (3.0 - 2.0 * phase);
 
 	float fade = 1.0;
+	float blur = 0.0;
 
 	if (mode < 0.5) {
 		/* MOTION_NONE: fully visible, no displacement. */
@@ -352,11 +393,12 @@ VertOut VSSlug(VertIn v)
 		/* MOTION_FADE */
 		fade = eased;
 	} else if (mode < 2.5) {
-		/* MOTION_SLIDE: rise into place while fading in. */
-		pos.y += (1.0 - eased) * param;
+		/* MOTION_SLIDE: travel in from `dir` while fading in. */
+		pos.xy += dir * ((1.0 - eased) * param);
 		fade = eased;
 	} else if (mode < 3.5) {
-		/* MOTION_POP: scale about the glyph's own pivot. */
+		/* MOTION_POP: scale about the glyph's own pivot. param is the
+		 * scale it starts at, so 0.4 grows into place and 2.0 shrinks. */
 		float s = lerp(param, 1.0, eased);
 
 		pos.xy = v.pivot.xy + (pos.xy - v.pivot.xy) * s;
@@ -364,13 +406,40 @@ VertOut VSSlug(VertIn v)
 	} else if (mode < 4.5) {
 		/* MOTION_TYPEWRITER: hard reveal, no partial alpha. */
 		fade = phase >= 1.0 ? 1.0 : 0.0;
-	} else {
+	} else if (mode < 5.5) {
 		/* MOTION_WAVE: continuous, never settles. param is amplitude in
-		 * source pixels; each glyph is offset along the wave by its index. */
-		float k = v.pivot.z * 0.35;
-
-		pos.y += sin(elapsed * 3.0 + k) * param;
+		 * source pixels along `dir`. The wave is spread along the text by
+		 * the same start time that staggers the one-shot presets, so
+		 * "apply per word" ripples word by word rather than letter by
+		 * letter without needing a second control. */
+		pos.xy += dir * (sin((elapsed - start) * omega) * param);
 		fade = 1.0;
+	} else if (mode < 6.5) {
+		/* MOTION_BLUR: resolves out of a blur rather than moving. The
+		 * width is in source pixels and is applied in the coverage solve;
+		 * see slug_Render. */
+		blur = (1.0 - eased) * param;
+		fade = eased;
+	} else if (mode < 7.5) {
+		/* MOTION_ROTATE: spin into place about the glyph's own pivot.
+		 * Rotation is affine, so the em coordinates carried by the four
+		 * corners still interpolate to the correct em point per fragment
+		 * and the coverage solve is unaffected. */
+		float a = param * SLUG_DEG_TO_RAD * (1.0 - eased);
+		float sa = sin(a);
+		float ca = cos(a);
+
+		float2 d = pos.xy - v.pivot.xy;
+
+		pos.xy = v.pivot.xy + float2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+		fade = eased;
+	} else {
+		/* MOTION_BOUNCE: travels in from `dir` like Slide, but overshoots
+		 * and settles back. The fade finishes in the first third so the
+		 * glyph is solid while it is still moving -- fading through an
+		 * overshoot looks like a mistake rather than a bounce. */
+		pos.xy += dir * ((1.0 - slug_BackOut(phase)) * param);
+		fade = min(phase * 3.0, 1.0);
 	}
 
 	/* The w component has to be forced to 1 here. libobs describes the POSITION
@@ -388,6 +457,7 @@ VertOut VSSlug(VertIn v)
 	o.color     = v.color;
 	o.fade      = fade;
 	o.solid     = v.em.z;
+	o.blur      = blur;
 
 	return o;
 }
@@ -406,7 +476,7 @@ float4 PSSlug(VertOut f) : TARGET
 	if (f.solid > 0.5)
 		return float4(f.color.rgb, f.color.a * f.fade * opacity);
 
-	float fill = slug_Render(f.emCoord, f.bandXform, f.shapeData.xy, f.shapeData.zw);
+	float fill = slug_Render(f.emCoord, f.bandXform, f.shapeData.xy, f.shapeData.zw, f.blur);
 
 	/* Coverage is folded into alpha rather than discarded, so glyphs stay
 	 * antialiased against whatever is behind them while animating. */

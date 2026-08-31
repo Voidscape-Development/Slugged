@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "slugged_source.hpp"
 #include "editor_bridge.hpp"
+#include "host_tokens.hpp"
 #include "migrate.hpp"
 #include "../util/log.hpp"
 
@@ -32,17 +33,36 @@ const char *const kFilterId = "slugged_text_filter";
 namespace {
 
 // Document text with tokens expanded, or the file's contents in file mode.
+//
+// The document and the token tables are guarded separately and are never held
+// at the same time: a script pushing a variable in should not have to wait
+// behind a rebuild, and a rebuild should not have to wait behind a script.
 std::string resolveText(SluggedSource *ctx)
 {
-	if (ctx->mode == TextSourceMode::File)
-		return ctx->tokens.expand(ctx->feed.text());
+	std::string plain;
 
-	const std::string plain = ctx->document.plainText();
+	if (ctx->mode == TextSourceMode::File) {
+		plain = ctx->feed.text();
+	} else {
+		std::lock_guard<std::mutex> lock(ctx->mutex);
 
-	return TokenContext::hasTokens(plain) ? ctx->tokens.expand(plain) : plain;
+		plain = ctx->document.plainText();
+	}
+
+	if (!TokenContext::hasTokens(plain))
+		return plain;
+
+	std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+	return ctx->tokens.expand(plain);
 }
 
 } // namespace
+
+void SluggedSource::replayMotion()
+{
+	replayRequested = true;
+}
 
 Document SluggedSource::documentCopy()
 {
@@ -80,17 +100,66 @@ void SluggedSource::rebuild()
 		local = document;
 	}
 
-	// In file mode, or when tokens are present, the visible text differs from
-	// what the document stores; substitute it while preserving styling.
-	const std::string resolved = resolvedText;
+	if (mode == TextSourceMode::File) {
+		// The whole document is the file's contents, so there is no run
+		// structure of its own to preserve.
+		local.setPlainText(resolvedText);
+	} else {
+		// Expanded run by run rather than through setPlainText(), which
+		// rebuilds the block list and would collapse every line back to a
+		// single run -- silently flattening the per-character styling of any
+		// source that contained so much as a {time}.
+		std::lock_guard<std::mutex> lock(tokenMutex);
 
-	if (mode == TextSourceMode::File || local.plainText() != resolved)
-		local.setPlainText(resolved);
+		local.expandTokens([this](const std::string &text) { return tokens.expand(text); });
+	}
+
+	// An overlay filter has no box of its own: it draws over whatever it is
+	// attached to. Laying out against that source's dimensions is what makes
+	// alignment mean anything here -- against the document's own auto size,
+	// centring text over a 1920x1080 capture centred it within a box exactly as
+	// wide as the text, which is to say not at all.
+	if (isFilter && local.sizeMode != SizeMode::Fixed) {
+		obs_source_t *target = obs_filter_get_target(source);
+
+		const uint32_t targetWidth = target ? obs_source_get_width(target) : 0;
+		const uint32_t targetHeight = target ? obs_source_get_height(target) : 0;
+
+		if (targetWidth > 0 && targetHeight > 0) {
+			local.sizeMode = SizeMode::Fixed;
+			local.boxWidth = float(targetWidth);
+			local.boxHeight = float(targetHeight);
+		}
+	}
 
 	const float available =
 		local.sizeMode == SizeMode::Fixed ? std::max(0.0f, local.boxWidth - 2.0f * local.padding) : 0.0f;
 
 	layout = Layout::run(local, available);
+
+	// How long one pass of the current preset takes, now that it is known how
+	// many characters, words or lines the stagger is spread over. The clock
+	// stops there, so a source left on screen for a day is not still adding
+	// 1/60 to a float too large to resolve the step.
+	{
+		uint32_t units = 1;
+
+		switch (local.motion.order) {
+		case MotionOrder::Together:
+			break;
+		case MotionOrder::PerGlyph:
+			units = uint32_t(layout.glyphs.size());
+			break;
+		case MotionOrder::PerWord:
+			units = layout.wordCount;
+			break;
+		case MotionOrder::PerLine:
+			units = uint32_t(layout.lines.size());
+			break;
+		}
+
+		animEnd = local.motion.passDuration(units) + 0.25f;
+	}
 
 	if (local.sizeMode == SizeMode::Fixed) {
 		width = uint32_t(std::max(1.0f, local.boxWidth));
@@ -152,18 +221,98 @@ void updateSource(void *data, obs_data_t *settings)
 {
 	auto *ctx = static_cast<SluggedSource *>(data);
 
-	std::lock_guard<std::mutex> lock(ctx->mutex);
+	bool motionChanged = false;
 
-	settings::load(settings, ctx->document, ctx->snapshot);
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
 
-	ctx->mode = obs_data_get_int(settings, "mode") == 1 ? TextSourceMode::File : TextSourceMode::Document;
+		const MotionSpec before = ctx->document.motion;
 
-	ctx->feedConfig.path = obs_data_get_string(settings, "file");
-	ctx->feedConfig.chatlog = obs_data_get_bool(settings, "chatlog");
-	ctx->feedConfig.chatlogLines = int(obs_data_get_int(settings, "chatlog_lines"));
+		settings::load(settings, ctx->document, ctx->snapshot);
+
+		motionChanged = ctx->document.motion != before;
+
+		ctx->mode = obs_data_get_int(settings, "mode") == 1 ? TextSourceMode::File : TextSourceMode::Document;
+
+		ctx->feedConfig.path = obs_data_get_string(settings, "file");
+		ctx->feedConfig.chatlog = obs_data_get_bool(settings, "chatlog");
+		ctx->feedConfig.chatlogLines = int(obs_data_get_int(settings, "chatlog_lines"));
+
+		ctx->variableFeedConfig.path = obs_data_get_string(settings, "variables_file");
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.setSourceVariables(settings::variablesFromData(settings, settings::kVariablesKey));
+	}
 
 	ctx->feed.invalidate();
+	ctx->variableFeed.invalidate();
 	ctx->dirty = true;
+
+	// Touching the motion controls replays what they configure. Without this
+	// the presets that settle were a single event at source creation: choosing
+	// Fade on a source that had been on screen for a minute animated nothing at
+	// all, because its window had closed fifty-nine seconds earlier.
+	if (motionChanged)
+		ctx->replayMotion();
+}
+
+// ---- scripting entry points -----------------------------------------------
+//
+// Everything a Slugged source can be driven with from outside is a proc on the
+// source, so `obs.obs_source_get_proc_handler` in a Lua or Python script
+// reaches all of it without the plugin having to be linked against.
+
+void setVariableProc(void *data, calldata_t *call)
+{
+	auto *ctx = static_cast<SluggedSource *>(data);
+
+	const char *name = nullptr;
+	const char *value = nullptr;
+
+	if (!calldata_get_string(call, "name", &name) || !name || !*name)
+		return;
+
+	if (!calldata_get_string(call, "value", &value))
+		value = "";
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.set(name, value ? value : "");
+	}
+
+	// The next tick re-expands and notices the difference by itself, so there
+	// is nothing to mark dirty here.
+}
+
+void clearVariablesProc(void *data, calldata_t *call)
+{
+	UNUSED_PARAMETER(call);
+
+	auto *ctx = static_cast<SluggedSource *>(data);
+
+	std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+	ctx->tokens.setSourceVariables({});
+}
+
+void replayProc(void *data, calldata_t *call)
+{
+	UNUSED_PARAMETER(call);
+
+	static_cast<SluggedSource *>(data)->replayMotion();
+}
+
+void replayHotkeyPressed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+
+	if (pressed)
+		static_cast<SluggedSource *>(data)->replayMotion();
 }
 
 void *createSource(obs_data_t *settings, obs_source_t *source, bool isFilter)
@@ -174,6 +323,17 @@ void *createSource(obs_data_t *settings, obs_source_t *source, bool isFilter)
 	ctx->isFilter = isFilter;
 
 	updateSource(ctx, settings);
+
+	proc_handler_t *procs = obs_source_get_proc_handler(source);
+
+	if (procs) {
+		proc_handler_add(procs, "void set_variable(string name, string value)", setVariableProc, ctx);
+		proc_handler_add(procs, "void clear_variables()", clearVariablesProc, ctx);
+		proc_handler_add(procs, "void replay_motion()", replayProc, ctx);
+	}
+
+	ctx->replayHotkey = obs_hotkey_register_source(source, "Slugged.Replay", obs_module_text("Hotkey.Replay"),
+						       replayHotkeyPressed, ctx);
 
 	return ctx;
 }
@@ -195,6 +355,9 @@ void destroySource(void *data)
 	// The editor holds a pointer to this instance; close it first so it cannot
 	// touch freed state.
 	editor::closeFor(ctx->source);
+
+	if (ctx->replayHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(ctx->replayHotkey);
 
 	obs_enter_graphics();
 	ctx->renderer.releaseGeometry();
@@ -222,11 +385,56 @@ void tickSource(void *data, float seconds)
 {
 	auto *ctx = static_cast<SluggedSource *>(data);
 
-	ctx->elapsed += seconds;
-	ctx->tokens.tick(ctx->elapsed);
+	// The source's own running time, which is what {uptime} and {timer} read.
+	// Deliberately not the animation clock below: they used to be one value,
+	// and replaying on a text change meant a timer reset itself every time it
+	// ticked over, leaving it alternating between 0:00 and 0:01 for ever.
+	ctx->uptime += seconds;
+
+	host::tick(seconds);
 
 	if (ctx->mode == TextSourceMode::File && ctx->feed.tick(ctx->feedConfig, seconds))
 		ctx->dirty = true;
+
+	if (ctx->variableFeed.tick(ctx->variableFeedConfig, seconds)) {
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.setFileVariables(settings::parseVariableFile(ctx->variableFeed.text()));
+	}
+
+	const uint64_t hostGeneration = host::generation();
+
+	if (hostGeneration != ctx->hostVariableGeneration) {
+		ctx->hostVariableGeneration = hostGeneration;
+
+		VariableMap values = host::values();
+
+		// {source} is the one host value that differs per source, so it is
+		// added here rather than in the shared table.
+		const char *name = obs_source_get_name(ctx->source);
+
+		values["source"] = name ? name : "";
+
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.setHostVariables(values);
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.tick(ctx->uptime);
+	}
+
+	MotionSpec motion;
+	ScrollSpec scroll;
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+
+		motion = ctx->document.motion;
+		scroll = ctx->document.scroll;
+	}
 
 	// Tokens are re-expanded every tick, but a re-layout only happens when the
 	// expansion actually produced different text -- a clock token changes once
@@ -237,18 +445,36 @@ void tickSource(void *data, float seconds)
 		ctx->resolvedText = resolved;
 		ctx->dirty = true;
 
-		std::lock_guard<std::mutex> lock(ctx->mutex);
-
-		if (ctx->document.motion.replayOnChange)
-			ctx->elapsed = 0.0f;
+		// Never is the only trigger that does not care; the rest are a
+		// ladder, each adding an occasion to the ones below it.
+		if (motion.trigger != MotionTrigger::Never)
+			ctx->replayMotion();
 	}
 
-	ScrollSpec scroll;
+	// ---- animation clock -------------------------------------------------
+	if (ctx->replayRequested.exchange(false))
+		ctx->animTime = 0.0f;
 
-	{
-		std::lock_guard<std::mutex> lock(ctx->mutex);
+	if (motion.motion != Motion::None) {
+		if (!motionIsTransient(motion.motion)) {
+			// A preset that never settles keeps its clock running, wrapped
+			// at a whole number of cycles: the phase is continuous across
+			// the wrap and the float stays small enough to resolve a frame.
+			ctx->animTime += seconds;
 
-		scroll = ctx->document.scroll;
+			const float period = motion.speed > 0.0f ? 1.0f / motion.speed : 0.0f;
+
+			if (period > 0.0f && ctx->animTime > period * 1024.0f)
+				ctx->animTime = std::fmod(ctx->animTime, period);
+		} else if (motion.trigger == MotionTrigger::Loop) {
+			ctx->animTime += seconds;
+
+			if (ctx->animTime >= motion.loopInterval)
+				ctx->replayMotion();
+		} else if (ctx->animTime < ctx->animEnd) {
+			// One-shot: run to the end of the pass and stop there.
+			ctx->animTime += seconds;
+		}
 	}
 
 	if (scroll.enabled) {
@@ -271,6 +497,25 @@ void tickSource(void *data, float seconds)
 		ctx->scrollX = 0.0f;
 		ctx->scrollY = 0.0f;
 	}
+}
+
+// Called when the source becomes visible, which for a source sitting in a scene
+// means every time that scene comes up. That is the moment an intro animation is
+// meant to play, so the triggers at or above Show restart on it.
+void showSource(void *data)
+{
+	auto *ctx = static_cast<SluggedSource *>(data);
+
+	MotionTrigger trigger;
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+
+		trigger = ctx->document.motion.trigger;
+	}
+
+	if (trigger == MotionTrigger::Show || trigger == MotionTrigger::Loop)
+		ctx->replayMotion();
 }
 
 // Draws the text. Assumes a graphics context is current.
@@ -303,7 +548,7 @@ void renderText(SluggedSource *ctx)
 		gs_matrix_translate3f(ctx->scrollX, ctx->scrollY, 0.0f);
 	}
 
-	ctx->renderer.draw(ctx->elapsed, local.opacity);
+	ctx->renderer.draw(ctx->animTime, local.opacity);
 
 	if (scrolling) {
 		gs_matrix_pop();
@@ -318,7 +563,7 @@ void renderText(SluggedSource *ctx)
 			gs_matrix_translate3f(ctx->scrollX - std::copysign(spanX, local.scroll.speedX),
 					      ctx->scrollY - std::copysign(spanY, local.scroll.speedY), 0.0f);
 
-			ctx->renderer.draw(ctx->elapsed, local.opacity);
+			ctx->renderer.draw(ctx->animTime, local.opacity);
 
 			gs_matrix_pop();
 		}
@@ -377,6 +622,7 @@ void registerSluggedSource()
 	sourceInfo.get_height = getHeight;
 	sourceInfo.video_tick = tickSource;
 	sourceInfo.video_render = renderSource;
+	sourceInfo.show = showSource;
 	sourceInfo.icon_type = OBS_ICON_TYPE_TEXT;
 
 	obs_register_source(&sourceInfo);
@@ -394,6 +640,7 @@ void registerSluggedSource()
 	filterInfo.get_properties = sourceProperties;
 	filterInfo.video_tick = tickSource;
 	filterInfo.video_render = renderFilter;
+	filterInfo.show = showSource;
 
 	obs_register_source(&filterInfo);
 }

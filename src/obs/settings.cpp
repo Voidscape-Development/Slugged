@@ -23,10 +23,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <algorithm>
 #include <cmath>
 
+#include <util/platform.h>
+
 namespace slugged {
 namespace settings {
 
 const char *const kDocumentRevisionKey = "document_revision";
+const char *const kVariablesKey = "variables";
 
 namespace {
 
@@ -245,10 +248,13 @@ obs_data_t *documentToData(const Document &doc)
 
 	obs_data_set_int(data, "motion", int(doc.motion.motion));
 	obs_data_set_int(data, "motion_order", int(doc.motion.order));
+	obs_data_set_int(data, "motion_direction", int(doc.motion.direction));
 	obs_data_set_double(data, "motion_duration", doc.motion.duration);
 	obs_data_set_double(data, "motion_stagger", doc.motion.stagger);
 	obs_data_set_double(data, "motion_param", doc.motion.param);
-	obs_data_set_bool(data, "motion_replay", doc.motion.replayOnChange);
+	obs_data_set_double(data, "motion_speed", doc.motion.speed);
+	obs_data_set_int(data, "motion_replay", int(doc.motion.trigger));
+	obs_data_set_double(data, "motion_loop_interval", doc.motion.loopInterval);
 
 	obs_data_set_bool(data, "scroll", doc.scroll.enabled);
 	obs_data_set_double(data, "scroll_x", doc.scroll.speedX);
@@ -343,10 +349,23 @@ void documentFromData(obs_data_t *data, Document &doc)
 
 	doc.motion.motion = Motion(obs_data_get_int(data, "motion"));
 	doc.motion.order = MotionOrder(obs_data_get_int(data, "motion_order"));
+	doc.motion.direction = MotionDirection(obs_data_get_int(data, "motion_direction"));
 	doc.motion.duration = float(obs_data_get_double(data, "motion_duration"));
 	doc.motion.stagger = float(obs_data_get_double(data, "motion_stagger"));
 	doc.motion.param = float(obs_data_get_double(data, "motion_param"));
-	doc.motion.replayOnChange = obs_data_get_bool(data, "motion_replay");
+
+	// A document written before wave speed existed stores nothing here, and a
+	// wave standing perfectly still is not a sensible reading of "absent".
+	if (obs_data_has_user_value(data, "motion_speed"))
+		doc.motion.speed = float(obs_data_get_double(data, "motion_speed"));
+
+	// This key used to be the boolean replayOnChange. obs_data reads a stored
+	// bool back as 0 or 1, and Never and TextChange are the first two triggers,
+	// so an old document migrates to exactly the behaviour it had.
+	doc.motion.trigger = MotionTrigger(obs_data_get_int(data, "motion_replay"));
+
+	if (obs_data_has_user_value(data, "motion_loop_interval"))
+		doc.motion.loopInterval = float(obs_data_get_double(data, "motion_loop_interval"));
 
 	doc.scroll.enabled = obs_data_get_bool(data, "scroll");
 	doc.scroll.speedX = float(obs_data_get_double(data, "scroll_x"));
@@ -362,9 +381,184 @@ void documentFromData(obs_data_t *data, Document &doc)
 
 	if (doc.motion.duration <= 0.0f)
 		doc.motion.duration = 0.35f;
+
+	if (doc.motion.loopInterval <= 0.0f)
+		doc.motion.loopInterval = 5.0f;
 }
 
 // ---------------------------------------------------------------------------
+
+VariableMap variablesFromData(obs_data_t *data, const char *key)
+{
+	VariableMap out;
+
+	obs_data_array_t *array = obs_data_get_array(data, key);
+
+	if (!array)
+		return out;
+
+	const size_t count = obs_data_array_count(array);
+
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *item = obs_data_array_item(array, i);
+
+		const char *value = obs_data_get_string(item, "value");
+
+		std::string name;
+		std::string parsed;
+
+		if (value && parseAssignment(value, name, parsed))
+			out[name] = std::move(parsed);
+
+		obs_data_release(item);
+	}
+
+	obs_data_array_release(array);
+
+	return out;
+}
+
+void variablesToData(obs_data_t *data, const char *key, const VariableMap &values)
+{
+	obs_data_array_t *array = obs_data_array_create();
+
+	for (const auto &[name, value] : values) {
+		obs_data_t *item = obs_data_create();
+
+		obs_data_set_string(item, "value", (name + "=" + value).c_str());
+
+		obs_data_array_push_back(array, item);
+		obs_data_release(item);
+	}
+
+	obs_data_set_array(data, key, array);
+	obs_data_array_release(array);
+}
+
+namespace {
+
+// obs_data_item_get_string returns null for an item that is not a string, and a
+// hand-edited file has no obligation to hold only strings.
+std::string itemString(obs_data_item_t *item)
+{
+	const char *value = obs_data_item_get_string(item);
+
+	return value ? value : "";
+}
+
+} // namespace
+
+VariableMap parseVariableFile(const std::string &text)
+{
+	// A leading brace can only be JSON: a "name=value" line cannot start with
+	// one, because a brace is exactly what a variable name may not contain.
+	const size_t first = text.find_first_not_of(" \t\r\n");
+
+	if (first == std::string::npos)
+		return {};
+
+	if (text[first] != '{')
+		return parseAssignments(text);
+
+	obs_data_t *json = obs_data_create_from_json(text.c_str() + first);
+
+	if (!json) {
+		// Malformed JSON falls back to the line parser rather than being
+		// dropped: a half-written file being appended to by a bot should not
+		// blank every variable it defines.
+		return parseAssignments(text);
+	}
+
+	VariableMap out;
+
+	for (obs_data_item_t *item = obs_data_first(json); item; obs_data_item_next(&item)) {
+		const std::string name = normaliseVariableName(obs_data_item_get_name(item));
+
+		if (name.empty())
+			continue;
+
+		// Numbers and booleans are as useful in an overlay as strings, and a
+		// bot writing JSON has no reason to quote a follower count.
+		switch (obs_data_item_gettype(item)) {
+		case OBS_DATA_STRING:
+			out[name] = itemString(item);
+			break;
+		case OBS_DATA_NUMBER:
+			out[name] = obs_data_item_numtype(item) == OBS_DATA_NUM_INT
+					    ? std::to_string(obs_data_item_get_int(item))
+					    : std::to_string(obs_data_item_get_double(item));
+			break;
+		case OBS_DATA_BOOLEAN:
+			out[name] = obs_data_item_get_bool(item) ? "true" : "false";
+			break;
+		default:
+			break;
+		}
+	}
+
+	obs_data_release(json);
+
+	return out;
+}
+
+namespace {
+
+const char *const kGlobalVariablesFile = "variables.json";
+
+} // namespace
+
+void loadGlobalVariables()
+{
+	char *path = obs_module_config_path(kGlobalVariablesFile);
+
+	if (!path)
+		return;
+
+	obs_data_t *data = obs_data_create_from_json_file_safe(path, "bak");
+
+	bfree(path);
+
+	if (!data)
+		return;
+
+	VariableMap values;
+
+	for (obs_data_item_t *item = obs_data_first(data); item; obs_data_item_next(&item)) {
+		const std::string name = normaliseVariableName(obs_data_item_get_name(item));
+
+		if (!name.empty())
+			values[name] = itemString(item);
+	}
+
+	obs_data_release(data);
+
+	GlobalVariables::replace(values);
+}
+
+void saveGlobalVariables()
+{
+	char *dir = obs_module_config_path(nullptr);
+
+	if (dir) {
+		os_mkdirs(dir);
+		bfree(dir);
+	}
+
+	char *path = obs_module_config_path(kGlobalVariablesFile);
+
+	if (!path)
+		return;
+
+	obs_data_t *data = obs_data_create();
+
+	for (const auto &[name, value] : GlobalVariables::snapshot())
+		obs_data_set_string(data, name.c_str(), value.c_str());
+
+	obs_data_save_json_safe(data, path, "tmp", "bak");
+
+	obs_data_release(data);
+	bfree(path);
+}
 
 void defaults(obs_data_t *data)
 {
@@ -406,9 +600,19 @@ void defaults(obs_data_t *data)
 
 	obs_data_set_default_int(data, "motion", 0);
 	obs_data_set_default_int(data, "motion_order", int(MotionOrder::PerGlyph));
+	obs_data_set_default_int(data, "motion_direction", int(MotionDirection::Up));
 	obs_data_set_default_double(data, "motion_duration", 0.35);
 	obs_data_set_default_double(data, "motion_stagger", 0.03);
-	obs_data_set_default_double(data, "motion_param", 24.0);
+	obs_data_set_default_double(data, "motion_param", motionParamSpec(Motion::Slide).defaultValue);
+	obs_data_set_default_double(data, "motion_speed", 0.5);
+	obs_data_set_default_int(data, "motion_replay", int(MotionTrigger::TextChange));
+	obs_data_set_default_double(data, "motion_loop_interval", 5.0);
+
+	obs_data_set_default_bool(data, "scroll", false);
+	obs_data_set_default_double(data, "scroll_x", 0.0);
+	obs_data_set_default_double(data, "scroll_y", 0.0);
+	obs_data_set_default_bool(data, "scroll_loop", true);
+	obs_data_set_default_double(data, "scroll_gap", 64.0);
 }
 
 namespace {
@@ -436,7 +640,11 @@ bool extentsChanged(obs_properties_t *props, obs_property_t *property, obs_data_
 	obs_property_set_visible(obs_properties_get(props, "extents_cx"), fixed);
 	obs_property_set_visible(obs_properties_get(props, "extents_cy"), fixed);
 	obs_property_set_visible(obs_properties_get(props, "wrap"), fixed);
-	obs_property_set_visible(obs_properties_get(props, "valign"), fixed);
+
+	// Vertical alignment used to be hidden along with these, which made it look
+	// like the setting did not exist rather than like it needed a box. It stays
+	// visible: the overlay filter lays out against the source it is attached to
+	// and so has a height to align within even with no fixed size of its own.
 
 	return true;
 }
@@ -478,28 +686,100 @@ bool backgroundChanged(obs_properties_t *props, obs_property_t *property, obs_da
 
 // Each motion preset uses a different subset of the parameters below it, and a
 // control that visibly does nothing is worse than no control at all.
+//
+// The amount control is more than shown or hidden: what it means changes with
+// the preset, so its label, its range and its default follow. Sharing one
+// -500..500 "Amount" across every preset is what made Pop useless, since Pop
+// reads it as a scale and the shared default of 24 started every glyph
+// twenty-four times too big.
 bool motionChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(property);
 
 	const auto motion = Motion(obs_data_get_int(settings, "motion"));
 	const auto order = MotionOrder(obs_data_get_int(settings, "motion_order"));
+	const auto trigger = MotionTrigger(obs_data_get_int(settings, "motion_replay"));
 
 	const bool animated = motion != Motion::None;
 
-	// Wave never settles, so it has no transition to time or to stagger; it
-	// spreads itself along the text by glyph index in the shader.
-	const bool timed = animated && motion != Motion::Wave;
+	// Wave never settles, so it has no transition to time; it does still take a
+	// stagger, which is what spreads the ripple along the text.
+	const bool timed = motionIsTransient(motion);
 
-	// Only the presets that displace or scale have an amount to give.
-	const bool hasAmount = motion == Motion::Slide || motion == Motion::Pop || motion == Motion::Wave;
+	const MotionParamSpec amount = motionParamSpec(motion);
 
-	obs_property_set_visible(obs_properties_get(props, "motion_order"), timed);
+	obs_property_set_visible(obs_properties_get(props, "motion_order"), animated);
+	obs_property_set_visible(obs_properties_get(props, "motion_direction"), motionHasDirection(motion));
 	obs_property_set_visible(obs_properties_get(props, "motion_duration"), timed);
-	obs_property_set_visible(obs_properties_get(props, "motion_stagger"), timed && order != MotionOrder::Together);
-	obs_property_set_visible(obs_properties_get(props, "motion_param"), hasAmount);
+	obs_property_set_visible(obs_properties_get(props, "motion_stagger"),
+				 animated && order != MotionOrder::Together);
+	obs_property_set_visible(obs_properties_get(props, "motion_speed"), motion == Motion::Wave);
+	obs_property_set_visible(obs_properties_get(props, "motion_replay"), timed);
+	obs_property_set_visible(obs_properties_get(props, "motion_loop_interval"),
+				 timed && trigger == MotionTrigger::Loop);
+	obs_property_set_visible(obs_properties_get(props, "motion_replay_now"), animated);
+
+	obs_property_t *param = obs_properties_get(props, "motion_param");
+
+	obs_property_set_visible(param, amount.label != nullptr);
+
+	if (amount.label) {
+		obs_property_set_description(param, obs_module_text(amount.label));
+		obs_property_float_set_limits(param, amount.min, amount.max, amount.step);
+
+		// Only rewrite the stored value when the preset it was tuned for
+		// cannot have been this one. A distance of 48 px is a legitimate
+		// slide and a nonsensical pop scale, so carrying it over would look
+		// like the control had broken rather than changed meaning.
+		const double current = obs_data_get_double(settings, "motion_param");
+
+		if (current < amount.min || current > amount.max)
+			obs_data_set_double(settings, "motion_param", amount.defaultValue);
+	}
 
 	return true;
+}
+
+bool scrollChanged(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+
+	const bool scrolling = obs_data_get_bool(settings, "scroll");
+	const bool loop = scrolling && obs_data_get_bool(settings, "scroll_loop");
+
+	obs_property_set_visible(obs_properties_get(props, "scroll_x"), scrolling);
+	obs_property_set_visible(obs_properties_get(props, "scroll_y"), scrolling);
+	obs_property_set_visible(obs_properties_get(props, "scroll_loop"), scrolling);
+	obs_property_set_visible(obs_properties_get(props, "scroll_gap"), loop);
+
+	return true;
+}
+
+// Replays the one-shot presets on demand. Routed through the source's own proc
+// handler rather than reaching into SluggedSource from here, so the same entry
+// point serves the button, the hotkey and any script that wants to trigger an
+// intro on cue.
+bool replayClicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+
+	auto *source = static_cast<obs_source_t *>(data);
+
+	if (!source)
+		return false;
+
+	proc_handler_t *handler = obs_source_get_proc_handler(source);
+
+	if (!handler)
+		return false;
+
+	calldata_t call = {};
+
+	proc_handler_call(handler, "replay_motion", &call);
+	calldata_free(&call);
+
+	return false;
 }
 
 bool openEditorClicked(obs_properties_t *props, obs_property_t *property, void *data)
@@ -605,12 +885,19 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(align, obs_module_text("Align.Right"), int(HAlign::Right));
 	obs_property_list_add_int(align, obs_module_text("Align.Justify"), int(HAlign::Justify));
 
+	// Alignment needs somewhere to align within, and an auto-sized source is
+	// exactly as wide as its own text. Saying so here is the difference between
+	// a control that looks broken and one that is waiting on a box.
+	obs_property_set_long_description(align, obs_module_text("Align.Hint"));
+
 	obs_property_t *valign = obs_properties_add_list(props, "valign", obs_module_text("VAlign"),
 							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Top"), int(VAlign::Top));
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Middle"), int(VAlign::Middle));
 	obs_property_list_add_int(valign, obs_module_text("VAlign.Bottom"), int(VAlign::Bottom));
+
+	obs_property_set_long_description(valign, obs_module_text("VAlign.Hint"));
 
 	obs_property_t *background = obs_properties_add_bool(props, "background", obs_module_text("Background"));
 	obs_property_set_modified_callback(background, backgroundChanged);
@@ -639,6 +926,9 @@ obs_properties_t *properties(void *sourceData)
 	obs_property_list_add_int(motion, obs_module_text("Motion.Pop"), int(Motion::Pop));
 	obs_property_list_add_int(motion, obs_module_text("Motion.Typewriter"), int(Motion::Typewriter));
 	obs_property_list_add_int(motion, obs_module_text("Motion.Wave"), int(Motion::Wave));
+	obs_property_list_add_int(motion, obs_module_text("Motion.Blur"), int(Motion::Blur));
+	obs_property_list_add_int(motion, obs_module_text("Motion.Rotate"), int(Motion::Rotate));
+	obs_property_list_add_int(motion, obs_module_text("Motion.Bounce"), int(Motion::Bounce));
 
 	obs_property_set_modified_callback(motion, motionChanged);
 
@@ -654,9 +944,70 @@ obs_properties_t *properties(void *sourceData)
 	// same visibility pass as the preset itself.
 	obs_property_set_modified_callback(order, motionChanged);
 
+	obs_property_t *direction = obs_properties_add_list(props, "motion_direction",
+							    obs_module_text("Motion.Direction"), OBS_COMBO_TYPE_LIST,
+							    OBS_COMBO_FORMAT_INT);
+
+	obs_property_list_add_int(direction, obs_module_text("Motion.Direction.Up"), int(MotionDirection::Up));
+	obs_property_list_add_int(direction, obs_module_text("Motion.Direction.Down"), int(MotionDirection::Down));
+	obs_property_list_add_int(direction, obs_module_text("Motion.Direction.Left"), int(MotionDirection::Left));
+	obs_property_list_add_int(direction, obs_module_text("Motion.Direction.Right"), int(MotionDirection::Right));
+
 	obs_properties_add_float(props, "motion_duration", obs_module_text("Motion.Duration"), 0.01, 10.0, 0.01);
 	obs_properties_add_float(props, "motion_stagger", obs_module_text("Motion.Stagger"), 0.0, 2.0, 0.005);
-	obs_properties_add_float(props, "motion_param", obs_module_text("Motion.Amount"), -500.0, 500.0, 1.0);
+
+	// The label and range of this one are rewritten per preset by
+	// motionChanged(); what is set here is only what an unconfigured source
+	// starts out showing.
+	obs_properties_add_float(props, "motion_param", obs_module_text("Motion.Amount"), -1000.0, 1000.0, 1.0);
+
+	obs_properties_add_float_slider(props, "motion_speed", obs_module_text("Motion.Speed"), 0.05, 5.0, 0.05);
+
+	// Which of these fires decides whether a one-shot preset is ever seen
+	// again after the source is created.
+	obs_property_t *replay = obs_properties_add_list(props, "motion_replay", obs_module_text("Motion.Replay"),
+							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+
+	obs_property_list_add_int(replay, obs_module_text("Motion.Replay.Never"), int(MotionTrigger::Never));
+	obs_property_list_add_int(replay, obs_module_text("Motion.Replay.TextChange"), int(MotionTrigger::TextChange));
+	obs_property_list_add_int(replay, obs_module_text("Motion.Replay.Show"), int(MotionTrigger::Show));
+	obs_property_list_add_int(replay, obs_module_text("Motion.Replay.Loop"), int(MotionTrigger::Loop));
+
+	obs_property_set_modified_callback(replay, motionChanged);
+
+	obs_properties_add_float(props, "motion_loop_interval", obs_module_text("Motion.Replay.Interval"), 0.1, 3600.0,
+				 0.1);
+
+	obs_properties_add_button2(props, "motion_replay_now", obs_module_text("Motion.ReplayNow"), replayClicked,
+				   sourceData);
+
+	// ---- continuous scrolling -------------------------------------------
+	obs_property_t *scroll = obs_properties_add_bool(props, "scroll", obs_module_text("Scroll"));
+
+	obs_property_set_modified_callback(scroll, scrollChanged);
+
+	obs_properties_add_float(props, "scroll_x", obs_module_text("Scroll.X"), -2000.0, 2000.0, 1.0);
+	obs_properties_add_float(props, "scroll_y", obs_module_text("Scroll.Y"), -2000.0, 2000.0, 1.0);
+
+	obs_property_t *scrollLoop = obs_properties_add_bool(props, "scroll_loop", obs_module_text("Scroll.Loop"));
+
+	obs_property_set_modified_callback(scrollLoop, scrollChanged);
+
+	obs_properties_add_float(props, "scroll_gap", obs_module_text("Scroll.Gap"), 0.0, 4000.0, 1.0);
+
+	// ---- variables -------------------------------------------------------
+	//
+	// Anything written {name} in the text is replaced at render time. The list
+	// is plain "name=value" strings so that a script, obs-websocket or
+	// Streamer.bot can rewrite it with SetInputSettings without knowing
+	// anything Slugged-specific.
+	obs_properties_add_text(props, "variables_help", obs_module_text("Variables.Help"), OBS_TEXT_INFO);
+
+	obs_properties_add_editable_list(props, kVariablesKey, obs_module_text("Variables"),
+					 OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
+
+	obs_properties_add_path(props, "variables_file", obs_module_text("Variables.File"), OBS_PATH_FILE,
+				obs_module_text("Variables.File.Filter"), nullptr);
 
 	return props;
 }
@@ -833,16 +1184,37 @@ void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot)
 		doc.wrap = current.extents ? WrapMode(current.wrap) : WrapMode::None;
 	}
 
-	// Motion always comes from the flat properties; the editor writes them
-	// back so the two never disagree.
+	// Motion and scrolling always come from the flat properties; the editor
+	// writes them back so the two never disagree.
 	doc.motion.motion = Motion(obs_data_get_int(data, "motion"));
 	doc.motion.order = MotionOrder(obs_data_get_int(data, "motion_order"));
+	doc.motion.direction = MotionDirection(obs_data_get_int(data, "motion_direction"));
 	doc.motion.duration = float(obs_data_get_double(data, "motion_duration"));
 	doc.motion.stagger = float(obs_data_get_double(data, "motion_stagger"));
 	doc.motion.param = float(obs_data_get_double(data, "motion_param"));
+	doc.motion.speed = float(obs_data_get_double(data, "motion_speed"));
+	doc.motion.trigger = MotionTrigger(obs_data_get_int(data, "motion_replay"));
+	doc.motion.loopInterval = float(obs_data_get_double(data, "motion_loop_interval"));
+
+	// Scrolling only gained flat properties after the editor did, so a source
+	// configured before that has its scroll in the stored document and nothing
+	// in its settings. An absent key means "never set here", not "off".
+	if (obs_data_has_user_value(data, "scroll")) {
+		doc.scroll.enabled = obs_data_get_bool(data, "scroll");
+		doc.scroll.speedX = float(obs_data_get_double(data, "scroll_x"));
+		doc.scroll.speedY = float(obs_data_get_double(data, "scroll_y"));
+		doc.scroll.loop = obs_data_get_bool(data, "scroll_loop");
+		doc.scroll.gap = float(obs_data_get_double(data, "scroll_gap"));
+	}
 
 	if (doc.motion.duration <= 0.0f)
 		doc.motion.duration = 0.35f;
+
+	if (doc.motion.loopInterval <= 0.0f)
+		doc.motion.loopInterval = 5.0f;
+
+	if (doc.motion.speed <= 0.0f)
+		doc.motion.speed = 0.5f;
 
 	snapshot = current;
 }
@@ -866,9 +1238,19 @@ void save(obs_data_t *data, const Document &doc)
 
 	obs_data_set_int(data, "motion", int(doc.motion.motion));
 	obs_data_set_int(data, "motion_order", int(doc.motion.order));
+	obs_data_set_int(data, "motion_direction", int(doc.motion.direction));
 	obs_data_set_double(data, "motion_duration", doc.motion.duration);
 	obs_data_set_double(data, "motion_stagger", doc.motion.stagger);
 	obs_data_set_double(data, "motion_param", doc.motion.param);
+	obs_data_set_double(data, "motion_speed", doc.motion.speed);
+	obs_data_set_int(data, "motion_replay", int(doc.motion.trigger));
+	obs_data_set_double(data, "motion_loop_interval", doc.motion.loopInterval);
+
+	obs_data_set_bool(data, "scroll", doc.scroll.enabled);
+	obs_data_set_double(data, "scroll_x", doc.scroll.speedX);
+	obs_data_set_double(data, "scroll_y", doc.scroll.speedY);
+	obs_data_set_bool(data, "scroll_loop", doc.scroll.loop);
+	obs_data_set_double(data, "scroll_gap", doc.scroll.gap);
 
 	if (!doc.blocks.empty() && !doc.blocks.front().runs.empty()) {
 		const Style &style = doc.blocks.front().runs.front().style;

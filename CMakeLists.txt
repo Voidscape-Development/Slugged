@@ -23,6 +23,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
+
+  # Several built-in tokens -- {scene}, {stream_time}, {dropped_frames} -- are
+  # only reachable through the frontend API. src/obs/host_tokens.cpp resolves
+  # the subset libobs alone can answer without it.
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE SLUGGED_HAVE_FRONTEND)
 endif()
 
 if(ENABLE_QT)
@@ -154,6 +159,8 @@ target_sources(
     src/core/tokens.cpp
     src/core/tokens.hpp
     src/core/types.hpp
+    src/core/variables.cpp
+    src/core/variables.hpp
     src/text/font_enum.cpp
     src/text/font_enum.hpp
     src/text/font_manager.cpp
@@ -169,6 +176,8 @@ target_sources(
     src/render/renderer.cpp
     src/render/renderer.hpp
     src/obs/editor_bridge.hpp
+    src/obs/host_tokens.cpp
+    src/obs/host_tokens.hpp
     src/obs/migrate.cpp
     src/obs/migrate.hpp
     src/obs/settings.cpp

@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include "../core/document.hpp"
+#include "../core/variables.hpp"
 
 #include <QMainWindow>
 #include <QPointer>
@@ -33,10 +34,12 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
+class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
+class QTableWidget;
 class QWidget;
 
 namespace slugged {
@@ -72,6 +75,7 @@ private slots:
 	void onLayoutChanged();
 	void onMotionChanged();
 	void onFontFamilyChanged();
+	void onVariablesChanged();
 
 private:
 	void buildUi();
@@ -80,8 +84,21 @@ private:
 	QWidget *buildFillPanel();
 	QWidget *buildLayoutPanel();
 	QWidget *buildMotionPanel();
+	QWidget *buildVariablesPanel();
 
 	void rebuildAxisControls();
+
+	// Follows the motion preset: what the amount control means, and therefore
+	// its label, its range and which of the other controls apply, changes with
+	// it.
+	void syncMotionControls();
+
+	// Replays the one-shot presets in the live preview, so the Motion tab shows
+	// what it is configuring rather than a still.
+	void replayMotion();
+
+	static VariableMap tableToMap(QTableWidget *table);
+	static void mapToTable(QTableWidget *table, const VariableMap &values);
 
 	// Pushes the edited document into the source.
 	void apply();
@@ -146,14 +163,29 @@ private:
 	QCheckBox *_background = nullptr;
 	ColorButton *_backgroundColor = nullptr;
 
+	// Held so a row can be hidden along with its label when the chosen preset
+	// has no use for it.
+	QFormLayout *_motionForm = nullptr;
+
 	QComboBox *_motion = nullptr;
 	QComboBox *_motionOrder = nullptr;
+	QComboBox *_motionDirection = nullptr;
 	QDoubleSpinBox *_motionDuration = nullptr;
 	QDoubleSpinBox *_motionStagger = nullptr;
 	QDoubleSpinBox *_motionParam = nullptr;
+	QLabel *_motionParamLabel = nullptr;
+	QDoubleSpinBox *_motionSpeed = nullptr;
+	QComboBox *_motionTrigger = nullptr;
+	QDoubleSpinBox *_motionLoopInterval = nullptr;
+
 	QCheckBox *_scrollEnabled = nullptr;
 	QDoubleSpinBox *_scrollX = nullptr;
 	QDoubleSpinBox *_scrollY = nullptr;
+	QCheckBox *_scrollLoop = nullptr;
+	QDoubleSpinBox *_scrollGap = nullptr;
+
+	QTableWidget *_sourceVariables = nullptr;
+	QTableWidget *_globalVariables = nullptr;
 };
 
 } // namespace slugged

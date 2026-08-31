@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include "../core/document.hpp"
+#include "../core/variables.hpp"
 
 #include <obs-module.h>
 
@@ -98,6 +99,30 @@ void save(obs_data_t *data, const Document &doc);
 // preset save/load.
 obs_data_t *documentToData(const Document &doc);
 void documentFromData(obs_data_t *data, Document &doc);
+
+// The per-source variable table, stored as an OBS editable list of "name=value"
+// strings.
+//
+// An editable list of plain strings is what makes the table reachable from
+// everything that already drives OBS sources: obs-websocket's SetInputSettings,
+// Streamer.bot, and a two-line Lua script can all write the array without
+// needing a Slugged-specific API, and the user can type into the same list by
+// hand in the properties dialog.
+extern const char *const kVariablesKey;
+
+VariableMap variablesFromData(obs_data_t *data, const char *key);
+void variablesToData(obs_data_t *data, const char *key, const VariableMap &values);
+
+// Parses a watched variables file, accepting either a JSON object of
+// name/value pairs or plain "name=value" lines. Bots write both.
+VariableMap parseVariableFile(const std::string &text);
+
+// The process-wide variable table is persisted next to the module's own config
+// rather than in a scene collection, because it is shared by every source in
+// every collection -- putting it in one of them would make which collection was
+// open decide whether the others' text resolved.
+void loadGlobalVariables();
+void saveGlobalVariables();
 
 } // namespace settings
 

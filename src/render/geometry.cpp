@@ -36,14 +36,19 @@ namespace {
 // The margin is derived from the glyph's pixel size rather than being a fixed
 // em constant: one pixel of fringe is a much larger fraction of an em at 12px
 // than at 200px, and a fixed constant would clip the fringe on small text.
-float aaMarginEm(float sizePx)
+//
+// `extraPixels` widens it further for a motion preset that deliberately spreads
+// coverage past the glyph's own outline. Blur is the one that does: it works by
+// stretching the analytic coverage ramp over several pixels, and without the
+// headroom the blurred edge would be sliced off square by the quad.
+float aaMarginEm(float sizePx, float extraPixels)
 {
 	constexpr float kFringePixels = 1.5f;
 
 	if (sizePx <= 0.0f)
 		return 0.02f;
 
-	return std::max(kFringePixels / sizePx, 0.005f);
+	return std::max((kFringePixels + std::max(extraPixels, 0.0f)) / sizePx, 0.005f);
 }
 
 struct QuadParams {
@@ -60,8 +65,17 @@ struct QuadParams {
 	float startTime = 0.0f;
 	float duration = 1.0f;
 
-	float ordinal = 0.0f;
-	float glyphCount = 1.0f;
+	// Position of this quad in whichever unit the stagger counts in, so the
+	// shader can spread a continuous effect along the text the same way a
+	// staggered one is spread through time.
+	float staggerIndex = 0.0f;
+
+	// Unit vector a displacing preset travels along, the angular rate of a
+	// continuous one, and the extra rasterisation headroom the preset needs.
+	float dirX = 0.0f;
+	float dirY = 0.0f;
+	float omega = 0.0f;
+	float marginPixels = 0.0f;
 };
 
 void emitQuad(const QuadParams &p, GeometryBuffers &out)
@@ -73,7 +87,7 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 	if (float(s.width) <= 0.0f || float(s.height) <= 0.0f)
 		return;
 
-	const float margin = aaMarginEm(p.sizePx);
+	const float margin = aaMarginEm(p.sizePx, p.marginPixels);
 
 	// Em-space bounds of the quad, expanded by the AA margin.
 	const float emX0 = float(s.bearingX) - margin;
@@ -147,8 +161,13 @@ void emitQuad(const QuadParams &p, GeometryBuffers &out)
 
 		out.pivot.push_back(pivotX);
 		out.pivot.push_back(pivotY);
-		out.pivot.push_back(p.ordinal);
-		out.pivot.push_back(p.glyphCount);
+		out.pivot.push_back(p.staggerIndex);
+		out.pivot.push_back(0.0f);
+
+		out.motion.push_back(p.dirX);
+		out.motion.push_back(p.dirY);
+		out.motion.push_back(p.omega);
+		out.motion.push_back(0.0f);
 	}
 
 	out.indices.push_back(base + 0);
@@ -209,8 +228,13 @@ void emitRect(const QuadParams &p, float x0, float y0, float x1, float y1, Geome
 
 		out.pivot.push_back(pivotX);
 		out.pivot.push_back(pivotY);
-		out.pivot.push_back(p.ordinal);
-		out.pivot.push_back(p.glyphCount);
+		out.pivot.push_back(p.staggerIndex);
+		out.pivot.push_back(0.0f);
+
+		out.motion.push_back(p.dirX);
+		out.motion.push_back(p.dirY);
+		out.motion.push_back(p.omega);
+		out.motion.push_back(0.0f);
 	}
 
 	out.indices.push_back(base + 0);
@@ -290,6 +314,57 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 	const MotionSpec &motion = doc.motion;
 	const float glyphCount = float(std::max<size_t>(layout.glyphs.size(), 1));
 
+	// Direction is resolved to a unit vector here rather than passed to the
+	// shader as an enum, so every displacing preset is one `pos.xy += dir * n`
+	// and the shader needs no per-preset axis logic. Layout is y-down, so "up"
+	// is -y.
+	float dirX = 0.0f;
+	float dirY = -1.0f;
+
+	switch (motion.direction) {
+	case MotionDirection::Up:
+		break;
+	case MotionDirection::Down:
+		dirY = 1.0f;
+		break;
+	case MotionDirection::Left:
+		dirX = -1.0f;
+		dirY = 0.0f;
+		break;
+	case MotionDirection::Right:
+		dirX = 1.0f;
+		dirY = 0.0f;
+		break;
+	}
+
+	// Speed is authored in cycles per second because that is what a user can
+	// picture; the shader wants radians.
+	const float omega = motion.speed * 2.0f * 3.14159265f;
+
+	// Blur spreads coverage outward, so its quads need room for the fringe.
+	// Everything else stays at the default antialiasing margin.
+	const float marginPixels = motion.motion == Motion::Blur ? std::max(motion.param, 0.0f) : 0.0f;
+
+	// Fills in everything a quad needs that does not depend on which glyph it
+	// belongs to.
+	auto motionParamsFor = [&](uint32_t ordinal, uint32_t wordIndex, uint32_t lineIndex) {
+		QuadParams params;
+
+		const float index = staggerIndex(ordinal, wordIndex, lineIndex, motion.order);
+
+		params.motionMode = float(int(motion.motion));
+		params.motionParam = motion.param;
+		params.startTime = motion.motion == Motion::None ? 0.0f : index * motion.stagger;
+		params.duration = std::max(motion.duration, 1e-4f);
+		params.staggerIndex = index;
+		params.dirX = dirX;
+		params.dirY = dirY;
+		params.omega = omega;
+		params.marginPixels = marginPixels;
+
+		return params;
+	};
+
 	// Gradient parameter runs along the layout's own extent, so a ramp spans
 	// the visible text rather than an arbitrary fixed distance.
 	const float spanX = std::max(layout.width, 1.0f);
@@ -301,22 +376,11 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 
 		const Style &style = *g.style;
 
-		const float startTime =
-			motion.motion == Motion::None
-				? 0.0f
-				: staggerIndex(g.ordinal, g.wordIndex, g.lineIndex, motion.order) * motion.stagger;
-
-		QuadParams params;
+		QuadParams params = motionParamsFor(g.ordinal, g.wordIndex, g.lineIndex);
 
 		params.penX = g.x;
 		params.baselineY = g.y;
 		params.sizePx = g.sizePx;
-		params.motionMode = float(int(motion.motion));
-		params.motionParam = motion.param;
-		params.startTime = startTime;
-		params.duration = std::max(motion.duration, 1e-4f);
-		params.ordinal = float(g.ordinal);
-		params.glyphCount = glyphCount;
 
 		// Gradient position: along the ramp direction across the whole block,
 		// or across the glyph's own box when perGlyph is set.
@@ -390,19 +454,7 @@ bool GeometryBuilder::build(const Document &doc, const LayoutResult &layout, con
 	// motion parameters of the first glyph it covers, so it animates in step
 	// with its own text rather than with the start of the document.
 	auto decorationParams = [&](const DecorationRect &d) {
-		QuadParams params;
-
-		params.motionMode = float(int(motion.motion));
-		params.motionParam = motion.param;
-		params.startTime =
-			motion.motion == Motion::None
-				? 0.0f
-				: staggerIndex(d.ordinal, d.wordIndex, d.lineIndex, motion.order) * motion.stagger;
-		params.duration = std::max(motion.duration, 1e-4f);
-		params.ordinal = float(d.ordinal);
-		params.glyphCount = glyphCount;
-
-		return params;
+		return motionParamsFor(d.ordinal, d.wordIndex, d.lineIndex);
 	};
 
 	auto drawable = [](const DecorationRect &d) {

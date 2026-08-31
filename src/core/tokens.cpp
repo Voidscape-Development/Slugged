@@ -25,12 +25,51 @@ namespace slugged {
 
 void TokenContext::set(const std::string &name, const std::string &value)
 {
-	_vars[name] = value;
+	const std::string key = normaliseVariableName(name);
+
+	if (!key.empty())
+		_source[key] = value;
+}
+
+void TokenContext::erase(const std::string &name)
+{
+	_source.erase(normaliseVariableName(name));
 }
 
 void TokenContext::clear()
 {
-	_vars.clear();
+	_source.clear();
+	_file.clear();
+}
+
+bool TokenContext::setSourceVariables(const VariableMap &values)
+{
+	if (_source == values)
+		return false;
+
+	_source = values;
+
+	return true;
+}
+
+bool TokenContext::setFileVariables(const VariableMap &values)
+{
+	if (_file == values)
+		return false;
+
+	_file = values;
+
+	return true;
+}
+
+bool TokenContext::setHostVariables(const VariableMap &values)
+{
+	if (_host == values)
+		return false;
+
+	_host = values;
+
+	return true;
 }
 
 bool TokenContext::hasTokens(const std::string &text)
@@ -51,7 +90,7 @@ std::string formatTime(const char *format)
 	localtime_r(&now, &local);
 #endif
 
-	char buf[128] = {0};
+	char buf[256] = {0};
 
 	if (!std::strftime(buf, sizeof(buf), format, &local))
 		return {};
@@ -81,48 +120,71 @@ std::string formatDuration(float seconds)
 
 } // namespace
 
-bool TokenContext::builtin(const std::string &name, std::string &out) const
+bool TokenContext::builtin(const std::string &name, const std::string &arg, std::string &out) const
 {
-	if (name == "time") {
-		out = formatTime("%H:%M");
+	// An arbitrary format string, so a layout that wants something the named
+	// tokens do not cover does not need a new token to be added here.
+	if (name == "strftime") {
+		if (arg.empty())
+			return false;
+
+		out = formatTime(arg.c_str());
+
 		return true;
 	}
 
-	if (name == "time12") {
-		out = formatTime("%I:%M %p");
-		return true;
-	}
+	struct Named {
+		const char *name;
+		const char *format;
+	};
 
-	if (name == "seconds") {
-		out = formatTime("%H:%M:%S");
-		return true;
-	}
+	static const Named kFormats[] = {
+		{"time", "%H:%M"},         {"time12", "%I:%M %p"}, {"seconds", "%H:%M:%S"}, {"date", "%Y-%m-%d"},
+		{"date_long", "%d %B %Y"}, {"weekday", "%A"},      {"month", "%B"},         {"year", "%Y"},
+	};
 
-	if (name == "date") {
-		out = formatTime("%Y-%m-%d");
-		return true;
+	for (const Named &format : kFormats) {
+		if (name == format.name) {
+			out = formatTime(format.format);
+			return true;
+		}
 	}
 
 	if (name == "uptime" || name == "timer") {
-		out = formatDuration(_elapsed);
+		out = formatDuration(_uptime);
 		return true;
 	}
 
 	return false;
 }
 
-bool TokenContext::lookup(const std::string &name, std::string &out) const
+bool TokenContext::lookup(const std::string &name, const std::string &arg, std::string &out) const
 {
-	// User and script variables shadow built-ins, so a stream can define its own
-	// {timer} without fighting the one here.
-	const auto it = _vars.find(name);
+	// A variable is matched on the whole token text, argument included, so
+	// setting a variable literally named "strftime:%H" is possible even though
+	// nothing sensible would.
+	const std::string full = arg.empty() ? name : name + ":" + arg;
 
-	if (it != _vars.end()) {
-		out = it->second;
+	for (const VariableMap *table : {&_source, &_file}) {
+		const auto it = table->find(full);
+
+		if (it != table->end()) {
+			out = it->second;
+			return true;
+		}
+	}
+
+	if (GlobalVariables::lookup(full, out))
+		return true;
+
+	const auto host = _host.find(full);
+
+	if (host != _host.end()) {
+		out = host->second;
 		return true;
 	}
 
-	return builtin(name, out);
+	return builtin(name, arg, out);
 }
 
 std::string TokenContext::expand(const std::string &text) const
@@ -152,11 +214,18 @@ std::string TokenContext::expand(const std::string &text) const
 			continue;
 		}
 
-		const std::string name = text.substr(i + 1, close - i - 1);
+		const std::string body = text.substr(i + 1, close - i - 1);
+
+		// Everything past the *first* colon is the argument, so a format
+		// string full of colons arrives intact.
+		const size_t colon = body.find(':');
+
+		const std::string name = colon == std::string::npos ? body : body.substr(0, colon);
+		const std::string arg = colon == std::string::npos ? std::string() : body.substr(colon + 1);
 
 		std::string value;
 
-		if (!name.empty() && lookup(name, value)) {
+		if (!name.empty() && lookup(name, arg, value)) {
 			// Inserted literally: a value containing braces is never
 			// re-scanned, so expansion always terminates.
 			out += value;

@@ -22,9 +22,11 @@ plus:
 - **Variable fonts.** Weight, width, slant and any other axis a font exposes, as live sliders.
 - **Colour fonts.** COLRv0 and COLRv1 emoji, gradients included.
 - **Gradients** across the block or ramped per character.
-- **Motion presets** — fade, slide, pop, typewriter, wave — staggered per character, word or line,
-  plus continuous scrolling for tickers and credit rolls.
+- **Motion presets** — fade, slide, pop, typewriter, wave, blur, spin and bounce — staggered per
+  character, word or line, replayed on whatever cue suits (a text change, the scene coming up, a
+  loop, a hotkey), plus continuous scrolling for tickers and credit rolls.
 - **Template tokens** like `{time}`, `{uptime}` and your own variables, resolved at render time.
+  Variables can be typed in, pushed in by a script or bot, or read from a file.
 - **A WYSIWYG editor window** whose preview is a live OBS render of the source itself.
 - **An overlay filter** variant, to lay text over any other source.
 
@@ -45,6 +47,78 @@ the dialog's single-style mirror — so styling one word in the editor stays on 
 scene collection reopens with its per-character styling intact. **Opacity** in the dialog is a
 whole-source multiplier applied in the shader: it fades the fill, outline and drop shadow together,
 while the alpha channel in each colour picker still controls that element on its own.
+
+## Tokens and variables
+
+Anything written `{name}` in a source's text is replaced as the source renders. A token with no
+value stays on screen exactly as typed, so a mistyped name is visible rather than silently blanking
+the text, and `{{` is a literal brace.
+
+Values are resolved in this order, first match winning: the variables on the source, the variables in
+the source's watched file, the table shared by every Slugged source, values read out of OBS, and the
+clock and calendar built-ins. So a source can shadow a shared value locally, and you can define your
+own `{timer}` without fighting the built-in one.
+
+**Setting variables by hand.** The properties dialog has a **Variables** list of `name=value` lines;
+the editor's **Variables** tab has the same table, plus the shared one. Shared variables are saved
+with the plugin rather than with a scene collection, so the same value is available in all of them.
+
+**Setting variables from a script or bot.** Every Slugged source exposes `set_variable`,
+`clear_variables` and `replay_motion` procs, and OBS's own proc handler gains
+`slugged_set_variable`, `slugged_get_variable`, `slugged_erase_variable` and
+`slugged_clear_variables` for the shared table:
+
+```lua
+local cd = obs.calldata_create()
+obs.calldata_set_string(cd, "name", "followers")
+obs.calldata_set_string(cd, "value", "1234")
+obs.proc_handler_call(obs.obs_get_proc_handler(), "slugged_set_variable", cd)
+obs.calldata_destroy(cd)
+```
+
+Anything that can already drive an OBS source can drive the per-source list without knowing anything
+Slugged-specific, because it is a plain array of strings in the source's settings: obs-websocket's
+`SetInputSettings` and Streamer.bot both write it directly.
+
+**Setting variables from a file.** Point **Variables file** at a file of `name=value` lines or a flat
+JSON object and it is re-read whenever it changes, which is the shape most bot tooling already
+writes.
+
+**Built-ins.** `{time}`, `{time12}`, `{seconds}`, `{date}`, `{date_long}`, `{weekday}`, `{month}`,
+`{year}`, `{strftime:%H:%M}` for any other format, `{uptime}` and `{timer}` for how long the source
+has existed, `{source}`, `{scene}`, `{preview_scene}`, `{stream_time}`, `{record_time}`, `{fps}`,
+`{dropped_frames}`, `{dropped_percent}`, `{cpu}` and `{bitrate}`.
+
+Token expansion rewrites each run's text in place, so per-character styling survives it — style one
+word of `Live for {uptime}` and it stays styled as the clock ticks. A token does have to sit inside
+one run to be recognised, which it will unless you deliberately styled half of it differently.
+
+## Motion
+
+Every preset but Wave settles into a final state and then holds it, so what matters as much as the
+preset is when it plays again. **Replay** decides: only when you change the settings, whenever the
+text changes, whenever the source becomes visible (which for a source in a scene means each time that
+scene comes up), or on a loop. There is also a **Play now** button in both the dialog and the editor,
+and an OBS hotkey, for triggering an intro on cue.
+
+The **Amount** control is labelled and ranged for the preset it belongs to — a travel distance in
+pixels for slide and bounce, a starting scale for pop, a starting angle for spin, a blur width for
+blur, a wave height for wave — and only carries a value over between presets when that value could
+plausibly have been meant for both.
+
+Blur is a real distance-field blur rather than a multi-tap one: Slug already solves coverage as an
+analytic ramp one pixel wide, and telling the solve there are fewer pixels per em spreads that same
+ramp over as many as you ask for, at the cost of one divide.
+
+## Alignment
+
+Alignment positions lines within the text block, which means it needs a block wider or taller than
+the line to do anything. An auto-sized source is exactly as wide as its longest line, so horizontal
+alignment moves the shorter lines of a multi-line source and has nothing to do on a single line;
+vertical alignment needs **Use fixed size** and a height. Justify never stretches a block's last
+line, so it needs word wrapping to have a line to stretch. The overlay filter is the exception on
+both counts: it lays out against the source it is attached to, so it has a box to align in without
+being given one.
 
 ## Migrating
 
