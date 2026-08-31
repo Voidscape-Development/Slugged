@@ -79,4 +79,28 @@ void Document::setPlainText(const std::string &text)
 	blocks = std::move(next);
 }
 
+bool Document::expandTokens(const std::function<std::string(const std::string &)> &expand)
+{
+	bool changed = false;
+
+	for (Block &block : blocks) {
+		for (Run &run : block.runs) {
+			// Cheap reject first: expansion allocates, and most runs in a
+			// styled document carry no braces at all.
+			if (run.text.find('{') == std::string::npos)
+				continue;
+
+			std::string expanded = expand(run.text);
+
+			if (expanded == run.text)
+				continue;
+
+			run.text = std::move(expanded);
+			changed = true;
+		}
+	}
+
+	return changed;
+}
+
 } // namespace slugged

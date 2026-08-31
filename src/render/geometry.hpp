@@ -40,7 +40,8 @@ struct GeometryBuffers {
 	std::vector<float> shapeData; // 4
 	std::vector<float> color;     // 4
 	std::vector<float> fx;        // 4: mode, param, startTime, duration
-	std::vector<float> pivot;     // 4: pivotX, pivotY, glyphOrdinal, glyphCount
+	std::vector<float> pivot;     // 4: pivotX, pivotY, staggerIndex, unused
+	std::vector<float> motion;    // 4: dirX, dirY, radiansPerSecond, unused
 
 	std::vector<uint32_t> indices;
 
@@ -57,6 +58,7 @@ struct GeometryBuffers {
 		color.clear();
 		fx.clear();
 		pivot.clear();
+		motion.clear();
 		indices.clear();
 	}
 };

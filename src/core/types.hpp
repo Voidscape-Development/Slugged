@@ -157,26 +157,141 @@ enum class WrapMode { None, Word, Character };
 enum class Direction { Auto, LTR, RTL };
 
 // Must stay in sync with the MOTION_* defines in data/effects/slugged.effect.
-enum class Motion { None = 0, Fade = 1, Slide = 2, Pop = 3, Typewriter = 4, Wave = 5 };
+enum class Motion {
+	None = 0,
+	Fade = 1,
+	Slide = 2,
+	Pop = 3,
+	Typewriter = 4,
+	Wave = 5,
+	Blur = 6,
+	Rotate = 7,
+	Bounce = 8,
+};
 
 // How a motion preset is distributed across the text.
 enum class MotionOrder { Together, PerGlyph, PerWord, PerLine };
 
+// Which way a preset that displaces the text travels before it settles. Slide
+// and Bounce come *from* this direction; Wave oscillates along it.
+enum class MotionDirection { Up, Down, Left, Right };
+
+// What makes a one-shot preset play again.
+//
+// Without this every one-shot preset was a single event at source creation:
+// picking Fade in the properties dialog on a source that had been on screen for
+// a minute animated nothing, because its window had closed fifty-nine seconds
+// earlier.
+enum class MotionTrigger {
+	// Plays once when the source is created, and whenever the motion settings
+	// themselves change (so the dialog previews what it is configuring).
+	Never,
+	// Also replays whenever the visible text changes. The default, and what
+	// makes an alert or a chat line animate in.
+	TextChange,
+	// Also replays every time the source becomes visible, which for a source
+	// in a scene means every time that scene comes up.
+	Show,
+	// Also replays on a fixed cycle.
+	Loop,
+};
+
+// True for presets that settle into a final state and then hold it. The others
+// (Wave) never stop, so they have no transition to time, stagger or replay.
+inline bool motionIsTransient(Motion motion)
+{
+	return motion != Motion::None && motion != Motion::Wave;
+}
+
+// True for presets whose displacement follows MotionDirection.
+inline bool motionHasDirection(Motion motion)
+{
+	return motion == Motion::Slide || motion == Motion::Bounce || motion == Motion::Wave;
+}
+
+// The scalar in MotionSpec::param means something different per preset, so each
+// one carries its own range and default rather than sharing one "Amount" that
+// is nonsense everywhere but the preset it was tuned for. Pop in particular
+// reads param as a *scale*, where the shared default of 24 started every glyph
+// twenty-four times too big.
+struct MotionParamSpec {
+	float min = 0.0f;
+	float max = 0.0f;
+	float step = 1.0f;
+	float defaultValue = 0.0f;
+
+	// Locale key for the control's label, or nullptr when the preset has no
+	// amount at all.
+	const char *label = nullptr;
+};
+
+inline MotionParamSpec motionParamSpec(Motion motion)
+{
+	switch (motion) {
+	case Motion::Slide:
+		return {-1000.0f, 1000.0f, 1.0f, 48.0f, "Motion.Amount.Distance"};
+	case Motion::Bounce:
+		return {-1000.0f, 1000.0f, 1.0f, 64.0f, "Motion.Amount.Distance"};
+	case Motion::Pop:
+		return {0.0f, 8.0f, 0.05f, 0.4f, "Motion.Amount.Scale"};
+	case Motion::Wave:
+		return {-500.0f, 500.0f, 1.0f, 12.0f, "Motion.Amount.Height"};
+	case Motion::Blur:
+		return {0.0f, 200.0f, 0.5f, 16.0f, "Motion.Amount.Blur"};
+	case Motion::Rotate:
+		return {-1440.0f, 1440.0f, 5.0f, 90.0f, "Motion.Amount.Angle"};
+	case Motion::None:
+	case Motion::Fade:
+	case Motion::Typewriter:
+		break;
+	}
+
+	return {};
+}
+
 struct MotionSpec {
 	Motion motion = Motion::None;
 	MotionOrder order = MotionOrder::PerGlyph;
+	MotionDirection direction = MotionDirection::Up;
 
 	// Seconds for one glyph's transition, and the delay added per unit of
 	// `order` so the effect sweeps through the text.
 	float duration = 0.35f;
 	float stagger = 0.03f;
 
-	// Preset-specific: slide distance in px, pop start scale, wave amplitude.
-	float param = 24.0f;
+	// Preset-specific; see motionParamSpec() for what it means and what range
+	// it lives in for each preset.
+	float param = 48.0f;
 
-	// Restart the animation whenever the text content changes, rather than
-	// letting it play once when the source is created.
-	bool replayOnChange = true;
+	// Cycles per second for the presets that never settle (Wave).
+	float speed = 0.5f;
+
+	MotionTrigger trigger = MotionTrigger::TextChange;
+
+	// Seconds between replays for MotionTrigger::Loop.
+	float loopInterval = 5.0f;
+
+	// How long one full pass takes, given how many units the stagger is spread
+	// over. Used to bound the animation clock and to time the loop.
+	float passDuration(uint32_t units) const
+	{
+		const float spread = units > 0 ? stagger * float(units - 1) : 0.0f;
+
+		return duration + (spread > 0.0f ? spread : 0.0f);
+	}
+
+	// Compared so the source can restart the animation when the user changes
+	// how it looks. Without that, choosing Fade on a source that has been on
+	// screen for a minute animates nothing at all: its window closed
+	// fifty-nine seconds ago.
+	bool operator==(const MotionSpec &o) const
+	{
+		return motion == o.motion && order == o.order && direction == o.direction && duration == o.duration &&
+		       stagger == o.stagger && param == o.param && speed == o.speed && trigger == o.trigger &&
+		       loopInterval == o.loopInterval;
+	}
+
+	bool operator!=(const MotionSpec &o) const { return !(*this == o); }
 };
 
 // Continuous whole-block movement, applied as a matrix translation rather than

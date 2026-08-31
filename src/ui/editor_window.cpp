@@ -27,19 +27,23 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <algorithm>
 
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
 #include <obs-frontend-api.h>
@@ -171,8 +175,12 @@ void EditorWindow::reload()
 			settings::load(data, _document, fresh);
 		}
 
+		mapToTable(_sourceVariables, settings::variablesFromData(data, settings::kVariablesKey));
+
 		obs_data_release(data);
 	}
+
+	mapToTable(_globalVariables, GlobalVariables::snapshot());
 
 	if (_document.blocks.empty())
 		_document.setPlainText("");
@@ -301,6 +309,7 @@ void EditorWindow::buildUi()
 	tabs->addTab(buildFillPanel(), tr_("Editor.Tab.Style"));
 	tabs->addTab(buildLayoutPanel(), tr_("Editor.Tab.Layout"));
 	tabs->addTab(buildMotionPanel(), tr_("Editor.Tab.Motion"));
+	tabs->addTab(buildVariablesPanel(), tr_("Editor.Tab.Variables"));
 
 	splitter->addWidget(tabs);
 	splitter->setStretchFactor(0, 3);
@@ -582,6 +591,8 @@ QWidget *EditorWindow::buildMotionPanel()
 	auto *panel = new QWidget(this);
 	auto *form = new QFormLayout(panel);
 
+	_motionForm = form;
+
 	_motion = new QComboBox(panel);
 	_motion->addItem(tr_("Motion.None"), int(Motion::None));
 	_motion->addItem(tr_("Motion.Fade"), int(Motion::Fade));
@@ -589,6 +600,9 @@ QWidget *EditorWindow::buildMotionPanel()
 	_motion->addItem(tr_("Motion.Pop"), int(Motion::Pop));
 	_motion->addItem(tr_("Motion.Typewriter"), int(Motion::Typewriter));
 	_motion->addItem(tr_("Motion.Wave"), int(Motion::Wave));
+	_motion->addItem(tr_("Motion.Blur"), int(Motion::Blur));
+	_motion->addItem(tr_("Motion.Rotate"), int(Motion::Rotate));
+	_motion->addItem(tr_("Motion.Bounce"), int(Motion::Bounce));
 	connect(_motion, &QComboBox::currentIndexChanged, this, &EditorWindow::onMotionChanged);
 
 	_motionOrder = new QComboBox(panel);
@@ -597,6 +611,13 @@ QWidget *EditorWindow::buildMotionPanel()
 	_motionOrder->addItem(tr_("Motion.Order.Word"), int(MotionOrder::PerWord));
 	_motionOrder->addItem(tr_("Motion.Order.Line"), int(MotionOrder::PerLine));
 	connect(_motionOrder, &QComboBox::currentIndexChanged, this, &EditorWindow::onMotionChanged);
+
+	_motionDirection = new QComboBox(panel);
+	_motionDirection->addItem(tr_("Motion.Direction.Up"), int(MotionDirection::Up));
+	_motionDirection->addItem(tr_("Motion.Direction.Down"), int(MotionDirection::Down));
+	_motionDirection->addItem(tr_("Motion.Direction.Left"), int(MotionDirection::Left));
+	_motionDirection->addItem(tr_("Motion.Direction.Right"), int(MotionDirection::Right));
+	connect(_motionDirection, &QComboBox::currentIndexChanged, this, &EditorWindow::onMotionChanged);
 
 	_motionDuration = new QDoubleSpinBox(panel);
 	_motionDuration->setRange(0.01, 10.0);
@@ -611,9 +632,31 @@ QWidget *EditorWindow::buildMotionPanel()
 	_motionStagger->setSuffix(" s");
 	connect(_motionStagger, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
 
+	// Range, step and label all follow the preset; see syncMotionControls().
 	_motionParam = new QDoubleSpinBox(panel);
-	_motionParam->setRange(-500.0, 500.0);
+	_motionParamLabel = new QLabel(tr_("Motion.Amount"), panel);
 	connect(_motionParam, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
+
+	_motionSpeed = new QDoubleSpinBox(panel);
+	_motionSpeed->setRange(0.05, 5.0);
+	_motionSpeed->setSingleStep(0.05);
+	_motionSpeed->setSuffix(" Hz");
+	connect(_motionSpeed, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
+
+	_motionTrigger = new QComboBox(panel);
+	_motionTrigger->addItem(tr_("Motion.Replay.Never"), int(MotionTrigger::Never));
+	_motionTrigger->addItem(tr_("Motion.Replay.TextChange"), int(MotionTrigger::TextChange));
+	_motionTrigger->addItem(tr_("Motion.Replay.Show"), int(MotionTrigger::Show));
+	_motionTrigger->addItem(tr_("Motion.Replay.Loop"), int(MotionTrigger::Loop));
+	connect(_motionTrigger, &QComboBox::currentIndexChanged, this, &EditorWindow::onMotionChanged);
+
+	_motionLoopInterval = new QDoubleSpinBox(panel);
+	_motionLoopInterval->setRange(0.1, 3600.0);
+	_motionLoopInterval->setSuffix(" s");
+	connect(_motionLoopInterval, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
+
+	auto *replay = new QPushButton(tr_("Motion.ReplayNow"), panel);
+	connect(replay, &QPushButton::clicked, this, &EditorWindow::replayMotion);
 
 	_scrollEnabled = new QCheckBox(tr_("Editor.Scroll"), panel);
 	connect(_scrollEnabled, &QCheckBox::toggled, this, &EditorWindow::onMotionChanged);
@@ -628,16 +671,230 @@ QWidget *EditorWindow::buildMotionPanel()
 	_scrollY->setSuffix(" px/s");
 	connect(_scrollY, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
 
+	_scrollLoop = new QCheckBox(tr_("Scroll.Loop"), panel);
+	connect(_scrollLoop, &QCheckBox::toggled, this, &EditorWindow::onMotionChanged);
+
+	_scrollGap = new QDoubleSpinBox(panel);
+	_scrollGap->setRange(0.0, 4000.0);
+	_scrollGap->setSuffix(" px");
+	connect(_scrollGap, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMotionChanged);
+
 	form->addRow(tr_("Motion"), _motion);
 	form->addRow(tr_("Motion.Order"), _motionOrder);
+	form->addRow(tr_("Motion.Direction"), _motionDirection);
 	form->addRow(tr_("Motion.Duration"), _motionDuration);
 	form->addRow(tr_("Motion.Stagger"), _motionStagger);
-	form->addRow(tr_("Motion.Amount"), _motionParam);
+	form->addRow(_motionParamLabel, _motionParam);
+	form->addRow(tr_("Motion.Speed"), _motionSpeed);
+	form->addRow(tr_("Motion.Replay"), _motionTrigger);
+	form->addRow(tr_("Motion.Replay.Interval"), _motionLoopInterval);
+	form->addRow(QString(), replay);
 	form->addRow(QString(), _scrollEnabled);
 	form->addRow(tr_("Editor.ScrollX"), _scrollX);
 	form->addRow(tr_("Editor.ScrollY"), _scrollY);
+	form->addRow(QString(), _scrollLoop);
+	form->addRow(tr_("Scroll.Gap"), _scrollGap);
 
 	return panel;
+}
+
+namespace {
+
+// Hides a form row along with the label the layout generated for it, so a
+// control that does not apply to the chosen preset leaves no orphan caption
+// behind.
+void setRowVisible(QFormLayout *form, QWidget *field, bool visible)
+{
+	if (!form || !field)
+		return;
+
+	field->setVisible(visible);
+
+	if (QWidget *label = form->labelForField(field))
+		label->setVisible(visible);
+}
+
+} // namespace
+
+void EditorWindow::syncMotionControls()
+{
+	const auto motion = Motion(_motion->currentData().toInt());
+	const auto order = MotionOrder(_motionOrder->currentData().toInt());
+	const auto trigger = MotionTrigger(_motionTrigger->currentData().toInt());
+
+	const bool animated = motion != Motion::None;
+	const bool timed = motionIsTransient(motion);
+
+	const MotionParamSpec amount = motionParamSpec(motion);
+
+	setRowVisible(_motionForm, _motionOrder, animated);
+	setRowVisible(_motionForm, _motionDirection, motionHasDirection(motion));
+	setRowVisible(_motionForm, _motionDuration, timed);
+	setRowVisible(_motionForm, _motionStagger, animated && order != MotionOrder::Together);
+	setRowVisible(_motionForm, _motionSpeed, motion == Motion::Wave);
+	setRowVisible(_motionForm, _motionTrigger, timed);
+	setRowVisible(_motionForm, _motionLoopInterval, timed && trigger == MotionTrigger::Loop);
+	setRowVisible(_motionForm, _motionParam, amount.label != nullptr);
+
+	if (!amount.label)
+		return;
+
+	_motionParamLabel->setText(tr_(amount.label));
+
+	const bool blocked = _motionParam->blockSignals(true);
+
+	_motionParam->setRange(double(amount.min), double(amount.max));
+	_motionParam->setSingleStep(double(amount.step));
+	_motionParam->setDecimals(amount.step < 1.0f ? 2 : 0);
+
+	// Only reset when the stored value cannot have been meant for this preset.
+	// A distance of 48 px is a legitimate slide and a nonsensical pop scale, so
+	// carrying it over would look like the control had broken rather than
+	// changed meaning.
+	if (_document.motion.param < amount.min || _document.motion.param > amount.max) {
+		_document.motion.param = amount.defaultValue;
+		_motionParam->setValue(double(amount.defaultValue));
+	}
+
+	_motionParam->blockSignals(blocked);
+}
+
+void EditorWindow::replayMotion()
+{
+	proc_handler_t *handler = obs_source_get_proc_handler(_source);
+
+	if (!handler)
+		return;
+
+	calldata_t call = {};
+
+	proc_handler_call(handler, "replay_motion", &call);
+	calldata_free(&call);
+}
+
+namespace {
+
+// A two-column name/value table with Add and Remove beneath it. Both variable
+// scopes use the same shape, so the differences between them are the title, the
+// data and where an edit is written back to.
+QWidget *buildVariableTable(QWidget *parent, const QString &title, const QString &hint, QTableWidget *&table,
+			    const std::function<void()> &onChanged)
+{
+	auto *box = new QGroupBox(title, parent);
+	auto *layout = new QVBoxLayout(box);
+
+	auto *caption = new QLabel(hint, box);
+	caption->setWordWrap(true);
+
+	table = new QTableWidget(0, 2, box);
+	table->setHorizontalHeaderLabels({QString::fromUtf8(obs_module_text("Variables.Name")),
+					  QString::fromUtf8(obs_module_text("Variables.Value"))});
+	table->horizontalHeader()->setStretchLastSection(true);
+	table->verticalHeader()->setVisible(false);
+	table->setSelectionBehavior(QAbstractItemView::SelectRows);
+
+	auto *buttons = new QHBoxLayout();
+	auto *add = new QPushButton(QString::fromUtf8(obs_module_text("Variables.Add")), box);
+	auto *remove = new QPushButton(QString::fromUtf8(obs_module_text("Variables.Remove")), box);
+
+	QObject::connect(add, &QPushButton::clicked, table, [table]() {
+		const int row = table->rowCount();
+
+		table->insertRow(row);
+		table->setItem(row, 0, new QTableWidgetItem());
+		table->setItem(row, 1, new QTableWidgetItem());
+		table->editItem(table->item(row, 0));
+	});
+
+	QObject::connect(remove, &QPushButton::clicked, table, [table, onChanged]() {
+		const int row = table->currentRow();
+
+		if (row < 0)
+			return;
+
+		table->removeRow(row);
+		onChanged();
+	});
+
+	// A row with no name yet is skipped rather than stored, so adding a row and
+	// typing into it does not first push an empty variable through the source.
+	QObject::connect(table, &QTableWidget::itemChanged, table, [onChanged](QTableWidgetItem *) { onChanged(); });
+
+	buttons->addWidget(add);
+	buttons->addWidget(remove);
+	buttons->addStretch(1);
+
+	layout->addWidget(caption);
+	layout->addWidget(table, 1);
+	layout->addLayout(buttons);
+
+	return box;
+}
+
+} // namespace
+
+QWidget *EditorWindow::buildVariablesPanel()
+{
+	auto *panel = new QWidget(this);
+	auto *layout = new QVBoxLayout(panel);
+
+	auto *hint = new QLabel(tr_("Variables.Help"), panel);
+	hint->setWordWrap(true);
+
+	layout->addWidget(hint);
+
+	layout->addWidget(buildVariableTable(panel, tr_("Variables.Source"), tr_("Variables.Source.Hint"),
+					     _sourceVariables, [this]() { onVariablesChanged(); }));
+
+	layout->addWidget(buildVariableTable(panel, tr_("Variables.Global"), tr_("Variables.Global.Hint"),
+					     _globalVariables, [this]() { onVariablesChanged(); }));
+
+	return panel;
+}
+
+VariableMap EditorWindow::tableToMap(QTableWidget *table)
+{
+	VariableMap out;
+
+	if (!table)
+		return out;
+
+	for (int row = 0; row < table->rowCount(); row++) {
+		const QTableWidgetItem *name = table->item(row, 0);
+		const QTableWidgetItem *value = table->item(row, 1);
+
+		if (!name)
+			continue;
+
+		const std::string key = normaliseVariableName(name->text().toStdString());
+
+		if (key.empty())
+			continue;
+
+		out[key] = value ? value->text().toStdString() : std::string();
+	}
+
+	return out;
+}
+
+void EditorWindow::mapToTable(QTableWidget *table, const VariableMap &values)
+{
+	if (!table)
+		return;
+
+	const bool blocked = table->blockSignals(true);
+
+	table->setRowCount(0);
+
+	for (const auto &[name, value] : values) {
+		const int row = table->rowCount();
+
+		table->insertRow(row);
+		table->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(name)));
+		table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(value)));
+	}
+
+	table->blockSignals(blocked);
 }
 
 void EditorWindow::rebuildAxisControls()
@@ -802,15 +1059,54 @@ void EditorWindow::onMotionChanged()
 
 	_document.motion.motion = Motion(_motion->currentData().toInt());
 	_document.motion.order = MotionOrder(_motionOrder->currentData().toInt());
+	_document.motion.direction = MotionDirection(_motionDirection->currentData().toInt());
 	_document.motion.duration = float(_motionDuration->value());
 	_document.motion.stagger = float(_motionStagger->value());
-	_document.motion.param = float(_motionParam->value());
+	_document.motion.speed = float(_motionSpeed->value());
+	_document.motion.trigger = MotionTrigger(_motionTrigger->currentData().toInt());
+	_document.motion.loopInterval = float(_motionLoopInterval->value());
 
 	_document.scroll.enabled = _scrollEnabled->isChecked();
 	_document.scroll.speedX = float(_scrollX->value());
 	_document.scroll.speedY = float(_scrollY->value());
+	_document.scroll.loop = _scrollLoop->isChecked();
+	_document.scroll.gap = float(_scrollGap->value());
+
+	// Deliberately before the amount is read back. Switching preset re-ranges
+	// the control, and this is what decides whether the stored value survives
+	// that or is replaced by the new preset's default.
+	syncMotionControls();
+
+	// A preset with no amount leaves the control hidden, holding whatever the
+	// last preset that had one left in it. Reading that back would quietly
+	// overwrite a slide distance every time the user passed through Fade.
+	if (motionParamSpec(_document.motion.motion).label)
+		_document.motion.param = float(_motionParam->value());
 
 	apply();
+}
+
+void EditorWindow::onVariablesChanged()
+{
+	if (_updating)
+		return;
+
+	// The global table is not part of any document, so it is written straight
+	// through and persisted with the module's own config.
+	GlobalVariables::replace(tableToMap(_globalVariables));
+	settings::saveGlobalVariables();
+
+	// The per-source table lives in the source's settings alongside the
+	// document, where the properties dialog's own list reads it.
+	obs_data_t *data = obs_source_get_settings(_source);
+
+	if (!data)
+		return;
+
+	settings::variablesToData(data, settings::kVariablesKey, tableToMap(_sourceVariables));
+	obs_source_update(_source, data);
+
+	obs_data_release(data);
 }
 
 // ---------------------------------------------------------------------------
@@ -875,13 +1171,25 @@ void EditorWindow::syncControls()
 
 	_motion->setCurrentIndex(_motion->findData(int(_document.motion.motion)));
 	_motionOrder->setCurrentIndex(_motionOrder->findData(int(_document.motion.order)));
+	_motionDirection->setCurrentIndex(_motionDirection->findData(int(_document.motion.direction)));
 	_motionDuration->setValue(double(_document.motion.duration));
 	_motionStagger->setValue(double(_document.motion.stagger));
+	_motionSpeed->setValue(double(_document.motion.speed));
+	_motionTrigger->setCurrentIndex(_motionTrigger->findData(int(_document.motion.trigger)));
+	_motionLoopInterval->setValue(double(_document.motion.loopInterval));
+
+	// The range has to be widened to fit the stored value before the value is
+	// set, or a spin box still carrying the previous preset's limits would clamp
+	// it on the way in.
+	syncMotionControls();
+
 	_motionParam->setValue(double(_document.motion.param));
 
 	_scrollEnabled->setChecked(_document.scroll.enabled);
 	_scrollX->setValue(double(_document.scroll.speedX));
 	_scrollY->setValue(double(_document.scroll.speedY));
+	_scrollLoop->setChecked(_document.scroll.loop);
+	_scrollGap->setValue(double(_document.scroll.gap));
 
 	_updating = false;
 

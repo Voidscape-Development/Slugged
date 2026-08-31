@@ -180,14 +180,15 @@ bool Renderer::setGeometry(const GeometryBuffers &buffers)
 	// wide, so this is a straight copy rather than a strided one.
 	std::memcpy(data->points, buffers.positions.data(), vertices * sizeof(vec3));
 
-	data->num_tex = 6;
+	data->num_tex = 7;
 	data->tvarray = static_cast<gs_tvertarray *>(bmalloc(data->num_tex * sizeof(gs_tvertarray)));
 
-	const std::vector<float> *sources[6] = {
-		&buffers.em, &buffers.bandXform, &buffers.shapeData, &buffers.color, &buffers.fx, &buffers.pivot,
+	const std::vector<float> *sources[7] = {
+		&buffers.em, &buffers.bandXform, &buffers.shapeData, &buffers.color,
+		&buffers.fx, &buffers.pivot,     &buffers.motion,
 	};
 
-	for (size_t i = 0; i < 6; i++) {
+	for (size_t i = 0; i < 7; i++) {
 		data->tvarray[i].width = 4;
 		data->tvarray[i].array = copyFloats(*sources[i]);
 	}

@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "types.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,21 @@ struct Document {
 	// This is the path a script or obs-websocket takes when it sets `text`: the
 	// look the user built in the editor survives, only the words change.
 	void setPlainText(const std::string &text);
+
+	// Rewrites every run's text through `expand`, leaving the run structure --
+	// and therefore every per-character style -- exactly as it was. Returns true
+	// when any run changed.
+	//
+	// This is what token expansion goes through. Routing it through
+	// setPlainText() instead would collapse each line back to a single run,
+	// which silently flattened the styling of any source that contained so much
+	// as a {time}.
+	//
+	// A token has to sit inside one run to be recognised: styling half of
+	// "{time}" differently from the other half splits it in two and neither half
+	// resolves. That is the same rule as every other rich-text templating
+	// system, and the editor never splits a run the user did not select.
+	bool expandTokens(const std::function<std::string(const std::string &)> &expand);
 
 	// The style new content inherits when the document has no runs at all.
 	Style defaultStyle;
