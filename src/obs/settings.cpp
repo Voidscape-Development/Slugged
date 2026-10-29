@@ -308,7 +308,8 @@ Style readBaseStyle(obs_data_t *data)
 	return style;
 }
 
-void writeOverride(obs_data_t *obj, const StyleOverride &o){
+void writeOverride(obs_data_t *obj, const StyleOverride &o)
+{
 #define SLUGGED_X(name, type, member, key) \
 	if (o.name)                        \
 		put(obj, key, *o.name);
@@ -332,7 +333,8 @@ StyleOverride readOverride(obs_data_t *obj)
 	return o;
 }
 
-void writeParagraphOverride(obs_data_t *obj, const ParagraphOverride &o){
+void writeParagraphOverride(obs_data_t *obj, const ParagraphOverride &o)
+{
 #define SLUGGED_X(name, type, member, key) \
 	if (o.name)                        \
 		put(obj, key, *o.name);

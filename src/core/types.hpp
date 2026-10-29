@@ -379,7 +379,8 @@ struct ParagraphOverride {
 #undef SLUGGED_X
 	}
 
-	void clear(const ParagraphOverride &mask){
+	void clear(const ParagraphOverride &mask)
+	{
 #define SLUGGED_X(name, type, member, key) \
 	if (mask.name)                     \
 		name.reset();
