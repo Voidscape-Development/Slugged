@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "layout.hpp"
 #include "font_manager.hpp"
+#include "line_break.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -26,251 +27,312 @@ namespace slugged {
 
 namespace {
 
-// A glyph with its advance already resolved to pixels, before line breaking.
+// A glyph with its advance resolved to pixels, before line breaking.
 struct Measured {
 	ShapedGlyph glyph;
 	const Style *style = nullptr;
 	float advancePx = 0.0f;
+	bool breakBefore = false;
+	uint32_t textOffset = 0;
 };
 
-// One line's worth of measured glyphs.
 struct PendingLine {
 	std::vector<Measured> glyphs;
-	float width = 0.0f;
+	bool lastInParagraph = false;
+};
+
+struct BlockLines {
+	ParagraphStyle paragraph;
+	uint8_t baseLevel = 0;
+	const Style *style = nullptr;
+	std::vector<PendingLine> lines;
+};
+
+struct Metrics {
 	float ascent = 0.0f;
 	float descent = 0.0f;
 	float lineHeight = 0.0f;
 };
 
-void accumulateMetrics(PendingLine &line, const Measured &m)
+Metrics lineMetrics(const PendingLine &line, const Style &fallback)
 {
-	if (!m.glyph.face || !m.style)
-		return;
+	Metrics m;
 
-	const float size = m.style->sizePx;
+	for (const Measured &g : line.glyphs) {
+		if (!g.glyph.font || !g.style)
+			continue;
 
-	line.ascent = std::max(line.ascent, m.glyph.face->ascender * size);
-	line.descent = std::max(line.descent, m.glyph.face->descender * size);
-	line.lineHeight = std::max(line.lineHeight, m.glyph.face->defaultLineHeight() * size);
-}
+		const FontFile &file = *g.glyph.font->file;
+		const float size = g.style->sizePx;
 
-// Recomputes a line's metrics from scratch. Needed after a break moves glyphs
-// between lines, since metrics are maxima and cannot simply be subtracted.
-void recomputeMetrics(PendingLine &line)
-{
-	line.width = 0.0f;
-	line.ascent = 0.0f;
-	line.descent = 0.0f;
-	line.lineHeight = 0.0f;
-
-	for (const Measured &m : line.glyphs) {
-		line.width += m.advancePx;
-		accumulateMetrics(line, m);
+		m.ascent = std::max(m.ascent, file.ascender * size);
+		m.descent = std::max(m.descent, file.descender * size);
+		m.lineHeight = std::max(m.lineHeight, file.defaultLineHeight() * size);
 	}
+
+	if (m.lineHeight > 0.0f)
+		return m;
+
+	// An empty line still occupies a line of its paragraph's style.
+	if (FontInstance *font = FontManager::instance().acquire(fallback.font)) {
+		m.ascent = font->file->ascender * fallback.sizePx;
+		m.descent = font->file->descender * fallback.sizePx;
+		m.lineHeight = font->file->defaultLineHeight() * fallback.sizePx;
+	} else {
+		m.ascent = fallback.sizePx * 0.8f;
+		m.descent = fallback.sizePx * 0.2f;
+		m.lineHeight = fallback.sizePx * 1.2f;
+	}
+
+	return m;
 }
 
-// One block's lines, held until every block has been measured. Alignment cannot
-// be resolved during measuring because in auto-size mode it is relative to the
-// widest line in the whole document, which is not known until the last block.
-struct BlockLines {
-	const Block *block = nullptr;
-	std::vector<PendingLine> lines;
-};
+float widthOf(const std::vector<Measured> &glyphs)
+{
+	float w = 0.0f;
 
-// An underline or strikeout span being accumulated as the pen moves along a
-// line. It stays open across the spaces inside a run so the bar comes out
-// continuous rather than one rectangle per word.
+	for (const Measured &m : glyphs)
+		w += m.advancePx;
+
+	return w;
+}
+
+// Splits `line` before index `at`, returning the remainder with its leading
+// whitespace removed (a wrapped line never starts with the space it broke at).
+std::vector<Measured> splitAt(std::vector<Measured> &line, size_t at)
+{
+	std::vector<Measured> rest(line.begin() + long(at), line.end());
+
+	line.resize(at);
+
+	size_t lead = 0;
+
+	while (lead < rest.size() && rest[lead].glyph.whitespace)
+		lead++;
+
+	rest.erase(rest.begin(), rest.begin() + long(lead));
+
+	return rest;
+}
+
+size_t lastBreakIn(const std::vector<Measured> &line)
+{
+	for (size_t i = line.size(); i-- > 1;)
+		if (line[i].breakBefore)
+			return i;
+
+	return 0;
+}
+
+// An underline or strikeout span accumulating as the pen moves along a line.
 struct PendingDecoration {
 	bool active = false;
 	const Style *style = nullptr;
-	FontFace *face = nullptr;
+	const FontFile *file = nullptr;
 	float startX = 0.0f;
 	uint32_t ordinal = 0;
 	uint32_t wordIndex = 0;
+	uint32_t textOffset = 0;
 };
-
-// An empty line still occupies vertical space, so fall back to the block's
-// default style metrics when it has no glyphs of its own.
-void ensureMetrics(PendingLine &line, const Style &fallbackStyle)
-{
-	if (line.lineHeight > 0.0f)
-		return;
-
-	FontFace *face = FontManager::instance().acquire(fallbackStyle.font);
-
-	if (face) {
-		line.ascent = face->ascender * fallbackStyle.sizePx;
-		line.descent = face->descender * fallbackStyle.sizePx;
-		line.lineHeight = face->defaultLineHeight() * fallbackStyle.sizePx;
-	} else {
-		line.ascent = fallbackStyle.sizePx * 0.8f;
-		line.descent = fallbackStyle.sizePx * 0.2f;
-		line.lineHeight = fallbackStyle.sizePx * 1.2f;
-	}
-}
 
 } // namespace
 
-LayoutResult Layout::run(const Document &doc, float availableWidth)
+LayoutResult Layout::run(const Document &doc, float availableWidth, float availableHeight)
 {
 	LayoutResult result;
 
 	const bool wraps = doc.wrap != WrapMode::None && availableWidth > 0.0f;
 
-	// ---- phase 1: shape, measure and break every block ---------------------
-	std::vector<BlockLines> measuredBlocks;
-	measuredBlocks.reserve(doc.blocks.size());
+	// ---- phase 1: shape, measure and break every paragraph in logical order --
+	std::vector<BlockLines> paragraphs;
+	paragraphs.reserve(doc.blocks.size());
 
-	float widestLine = 0.0f;
+	float widest = 0.0f;
+	uint32_t blockOffset = 0;
 
 	for (const Block &block : doc.blocks) {
 		BlockLines entry;
-		entry.block = &block;
+		entry.paragraph = doc.resolve(block);
 
-		// ---- shape the whole block in one pass ---------------------------
 		std::vector<ShapeRun> shapeRuns;
-		shapeRuns.reserve(block.runs.size());
+		std::vector<const Style *> runStyles;
 
-		for (uint32_t i = 0; i < block.runs.size(); i++)
-			shapeRuns.push_back(ShapeRun{block.runs[i].text, &block.runs[i].style, i});
-
-		const std::vector<ShapedGlyph> shaped = Shaper::shape(shapeRuns, block.direction);
-
-		// ---- resolve advances to pixels ----------------------------------
-		std::vector<Measured> measured;
-		measured.reserve(shaped.size());
-
-		for (const ShapedGlyph &g : shaped) {
-			if (g.runIndex >= block.runs.size())
-				continue;
-
-			const Style &style = block.runs[g.runIndex].style;
-
-			Measured m;
-			m.glyph = g;
-			m.style = &style;
-
-			// Letter and word spacing are applied after shaping so they never
-			// disturb kerning or prevent ligatures from forming.
-			m.advancePx = g.advance * style.sizePx + style.letterSpacing +
-				      (g.whitespace ? style.wordSpacing : 0.0f);
-
-			measured.push_back(std::move(m));
+		for (uint32_t i = 0; i < block.runs.size(); i++) {
+			result.styles.push_back(doc.resolve(block.runs[i]));
+			runStyles.push_back(&result.styles.back());
+			shapeRuns.push_back(ShapeRun{block.runs[i].text, runStyles.back(), i});
 		}
 
-		// ---- break into lines --------------------------------------------
-		std::vector<PendingLine> &lines = entry.lines;
-		PendingLine current;
+		if (runStyles.empty()) {
+			result.styles.push_back(doc.base);
+			runStyles.push_back(&result.styles.back());
+		}
 
-		// Index within `current` of the most recent point we could break at.
-		size_t lastBreak = SIZE_MAX;
+		entry.style = runStyles.front();
 
-		for (const Measured &m : measured) {
-			const bool fits = !wraps || current.width + m.advancePx <= availableWidth;
+		const ShapedParagraph shaped = Shaper::shape(shapeRuns, entry.paragraph.direction);
+		const std::vector<bool> breaks = lineBreakOpportunities(shaped.text);
 
-			if (!fits && !current.glyphs.empty()) {
-				if (doc.wrap == WrapMode::Word && lastBreak != SIZE_MAX) {
-					// Move everything after the break onto the next line,
-					// dropping the breaking space itself so it does not
-					// show up as leading whitespace.
-					PendingLine next;
+		entry.baseLevel = shaped.baseLevel;
 
-					for (size_t i = lastBreak + 1; i < current.glyphs.size(); i++)
-						next.glyphs.push_back(current.glyphs[i]);
+		std::vector<Measured> current;
+		float width = 0.0f;
+		size_t lastBreak = 0;
 
-					current.glyphs.resize(lastBreak);
+		for (const ShapedGlyph &g : shaped.glyphs) {
+			Measured m;
 
-					recomputeMetrics(current);
-					recomputeMetrics(next);
+			m.glyph = g;
+			m.style = g.runIndex < runStyles.size() ? runStyles[g.runIndex] : runStyles.front();
+			m.advancePx = g.advance * m.style->sizePx + m.style->letterSpacing +
+				      (g.whitespace ? m.style->wordSpacing : 0.0f);
+			m.breakBefore = g.clusterStart && g.cluster < breaks.size() && breaks[g.cluster];
+			m.textOffset = blockOffset + g.cluster;
 
-					lines.push_back(std::move(current));
-					current = std::move(next);
-				} else {
-					// Character wrapping, or a single word longer than the
-					// whole line: break right here.
-					lines.push_back(std::move(current));
-					current = PendingLine{};
+			// Whitespace may hang past the edge; only ink has to fit.
+			if (wraps && !current.empty() && !g.whitespace && width + m.advancePx > availableWidth) {
+				size_t at = 0;
+
+				if (doc.wrap == WrapMode::Word)
+					at = lastBreak;
+
+				// No word boundary on this line (or character wrapping): break
+				// right here, but never inside a cluster.
+				if (at == 0) {
+					if (g.clusterStart) {
+						at = current.size();
+					} else {
+						size_t start = current.size();
+
+						while (start > 0 && !current[start - 1].glyph.clusterStart)
+							start--;
+
+						// `start - 1` opens the cluster `g` belongs to.
+						at = start > 1 ? start - 1 : 0;
+					}
 				}
 
-				lastBreak = SIZE_MAX;
+				if (at > 0) {
+					std::vector<Measured> rest = splitAt(current, at);
+
+					entry.lines.push_back(PendingLine{std::move(current), false});
+					current = std::move(rest);
+					width = widthOf(current);
+					lastBreak = lastBreakIn(current);
+				}
 			}
 
-			if (m.glyph.whitespace)
-				lastBreak = current.glyphs.size();
+			if (m.breakBefore && !current.empty())
+				lastBreak = current.size();
 
-			current.width += m.advancePx;
-			accumulateMetrics(current, m);
-			current.glyphs.push_back(m);
+			if (current.empty() && !entry.lines.empty() && g.whitespace)
+				continue;
+
+			width += m.advancePx;
+			current.push_back(std::move(m));
 		}
 
-		lines.push_back(std::move(current));
+		entry.lines.push_back(PendingLine{std::move(current), true});
 
-		const Style &blockStyle = block.runs.empty() ? doc.defaultStyle : block.runs.front().style;
+		for (PendingLine &line : entry.lines) {
+			// Trailing whitespace neither counts toward the width nor draws.
+			while (!line.glyphs.empty() && line.glyphs.back().glyph.whitespace)
+				line.glyphs.pop_back();
 
-		for (PendingLine &line : lines) {
-			ensureMetrics(line, blockStyle);
-
-			widestLine = std::max(widestLine, line.width);
+			widest = std::max(widest, widthOf(line.glyphs));
 		}
 
-		measuredBlocks.push_back(std::move(entry));
+		blockOffset += uint32_t(block.size()) + 1;
+		paragraphs.push_back(std::move(entry));
 	}
 
-	// Alignment needs an extent to align against. With a fixed box that is the
-	// box's inner width; in auto-size mode the source grows to its own content,
-	// so lines align against the widest line in the document. Falling back to
-	// each line's own width instead -- which is what the single-pass version
-	// did -- silently turns every alignment except Left into a no-op for an
-	// auto-sized source.
-	const float limit = availableWidth > 0.0f ? availableWidth : widestLine;
+	const float limit = availableWidth > 0.0f ? availableWidth : widest;
 
-	// ---- phase 2: place every line -----------------------------------------
+	// ---- phase 2: reorder each line for display and place it ---------------
 	float penY = 0.0f;
 	uint32_t lineIndex = 0;
 	uint32_t ordinal = 0;
 	uint32_t wordCounter = 0;
 
-	for (BlockLines &entry : measuredBlocks) {
-		const Block &block = *entry.block;
-		std::vector<PendingLine> &lines = entry.lines;
+	for (BlockLines &entry : paragraphs) {
+		const ParagraphStyle &paragraph = entry.paragraph;
+		const bool rtl = entry.baseLevel & 1;
 
-		penY += block.spaceBefore;
+		penY += paragraph.spaceBefore;
 
-		for (PendingLine &line : lines) {
-			const float lineHeight = line.lineHeight * block.lineHeight;
+		for (PendingLine &line : entry.lines) {
+			const Metrics metrics = lineMetrics(line, *entry.style);
+			const float lineHeight = metrics.lineHeight * paragraph.lineHeight;
+			const float leading = std::max(0.0f, lineHeight - (metrics.ascent + metrics.descent));
+			const float baselineY = penY + leading * 0.5f + metrics.ascent;
 
-			// Distribute the leading evenly above and below, so changing line
-			// height does not shift the first baseline oddly.
-			const float leading = std::max(0.0f, lineHeight - (line.ascent + line.descent));
-			const float baselineY = penY + leading * 0.5f + line.ascent;
+			const size_t count = line.glyphs.size();
+
+			// Reading-order bookkeeping comes first, so staggering follows the
+			// text rather than the screen.
+			std::vector<uint32_t> ordinals(count, 0);
+			std::vector<uint32_t> words(count, 0);
+			bool inWord = false;
+
+			for (size_t i = 0; i < count; i++) {
+				const Measured &m = line.glyphs[i];
+
+				if (m.glyph.whitespace) {
+					inWord = false;
+				} else {
+					if (!inWord) {
+						inWord = true;
+						wordCounter++;
+					}
+
+					ordinals[i] = ordinal++;
+				}
+
+				words[i] = wordCounter ? wordCounter - 1 : 0;
+			}
+
+			std::vector<uint8_t> levels(count);
+			std::vector<size_t> order(count);
+
+			for (size_t i = 0; i < count; i++) {
+				levels[i] = line.glyphs[i].glyph.level;
+				order[i] = i;
+			}
+
+			reorderLine(levels, order);
+
+			const float width = widthOf(line.glyphs);
+
+			HAlign align = paragraph.align;
+
+			// Justify never stretches a paragraph's last line.
+			if (align == HAlign::Justify && line.lastInParagraph)
+				align = HAlign::Start;
 
 			float startX = 0.0f;
 			float justifyExtra = 0.0f;
 
-			switch (block.align) {
-			case HAlign::Left:
-				startX = 0.0f;
+			switch (align) {
+			case HAlign::Start:
+				startX = rtl ? limit - width : 0.0f;
+				break;
+			case HAlign::End:
+				startX = rtl ? 0.0f : limit - width;
 				break;
 			case HAlign::Center:
-				startX = (limit - line.width) * 0.5f;
-				break;
-			case HAlign::Right:
-				startX = limit - line.width;
+				startX = (limit - width) * 0.5f;
 				break;
 			case HAlign::Justify: {
-				startX = 0.0f;
-
-				// Justification stretches the spaces, not the letters, and
-				// never the last line of a block.
-				const bool isLast = (&line == &lines.back());
 				size_t spaces = 0;
 
 				for (const Measured &m : line.glyphs)
 					if (m.glyph.whitespace)
 						spaces++;
 
-				if (!isLast && spaces > 0 && limit > line.width)
-					justifyExtra = (limit - line.width) / float(spaces);
+				if (spaces > 0 && limit > width)
+					justifyExtra = (limit - width) / float(spaces);
+				else if (rtl)
+					startX = limit - width;
 
 				break;
 			}
@@ -278,40 +340,32 @@ LayoutResult Layout::run(const Document &doc, float availableWidth)
 
 			LineInfo info;
 			info.baselineY = baselineY;
-			info.width = line.width;
-			info.ascent = line.ascent;
-			info.descent = line.descent;
-			info.firstGlyph = result.glyphs.size();
+			info.x = startX;
+			info.width = justifyExtra > 0.0f ? limit : width;
+			info.ascent = metrics.ascent;
+			info.descent = metrics.descent;
 
 			float penX = startX;
-			bool inWord = false;
 
 			PendingDecoration underline;
 			PendingDecoration strikeout;
 
-			// Closes an open span at `endX` and emits its bar. `strike` picks
-			// which set of face metrics to measure against.
 			auto closeSpan = [&](PendingDecoration &span, bool strike, float endX) {
 				if (!span.active)
 					return;
 
 				span.active = false;
 
-				if (!span.style || !span.face || endX <= span.startX)
+				if (!span.style || !span.file || endX <= span.startX)
 					return;
 
 				const float size = span.style->sizePx;
+				const float thickness = std::max(
+					1.0f, (strike ? span.file->strikeoutThickness : span.file->underlineThickness) * size);
 
-				const float thickness = std::max(1.0f, (strike ? span.face->strikeoutThickness
-									       : span.face->underlineThickness) *
-									       size);
-
-				// Both metrics are y-up about the baseline while layout is
-				// y-down, hence the negation. FreeType reports the underline
-				// position as the centre of the stem, but OS/2 reports the
-				// strikeout position as its top edge, so only the underline
-				// needs re-centring.
-				const float pos = strike ? span.face->strikeoutPos : span.face->underlinePos;
+				// Both metrics are y-up about the baseline. FreeType gives the
+				// underline's centre but OS/2 gives the strikeout's top edge.
+				const float pos = strike ? span.file->strikeoutPos : span.file->underlinePos;
 
 				DecorationRect rect;
 
@@ -323,21 +377,14 @@ LayoutResult Layout::run(const Document &doc, float availableWidth)
 				rect.lineIndex = lineIndex;
 				rect.wordIndex = span.wordIndex;
 				rect.ordinal = span.ordinal;
+				rect.textOffset = span.textOffset;
 
 				result.decorations.push_back(rect);
 			};
 
-			for (const Measured &m : line.glyphs) {
-				if (m.glyph.whitespace) {
-					inWord = false;
-				} else if (!inWord) {
-					inWord = true;
-					wordCounter++;
-				}
+			for (size_t index : order) {
+				const Measured &m = line.glyphs[index];
 
-				// A span breaks when the decoration turns off or the style
-				// changes, so two differently coloured underlined runs produce
-				// two bars rather than one in the first run's colour.
 				const bool wantUnderline = m.style && m.style->underline;
 				const bool wantStrikeout = m.style && m.style->strikeout;
 
@@ -347,45 +394,41 @@ LayoutResult Layout::run(const Document &doc, float availableWidth)
 				if (strikeout.active && (!wantStrikeout || strikeout.style != m.style))
 					closeSpan(strikeout, true, penX);
 
-				for (int pass = 0; pass < 2; pass++) {
-					PendingDecoration &span = pass == 0 ? underline : strikeout;
+				for (PendingDecoration *span : {&underline, &strikeout}) {
+					const bool want = span == &underline ? wantUnderline : wantStrikeout;
 
-					if (!(pass == 0 ? wantUnderline : wantStrikeout))
+					if (!want)
 						continue;
 
-					if (!span.active) {
-						span.active = true;
-						span.style = m.style;
-						span.face = m.glyph.face;
-						span.startX = penX;
-						span.ordinal = ordinal;
-						span.wordIndex = wordCounter ? wordCounter - 1 : 0;
-					} else if (!span.face) {
-						// The span opened on a space, which may carry no face.
-						span.face = m.glyph.face;
+					if (!span->active) {
+						span->active = true;
+						span->style = m.style;
+						span->file = m.glyph.font ? m.glyph.font->file : nullptr;
+						span->startX = penX;
+						span->ordinal = ordinals[index];
+						span->wordIndex = words[index];
+						span->textOffset = m.textOffset;
+					} else if (!span->file && m.glyph.font) {
+						span->file = m.glyph.font->file;
 					}
 				}
 
-				PositionedGlyph pg;
-
-				pg.face = m.glyph.face;
-				pg.glyphIndex = m.glyph.glyphIndex;
-				pg.sizePx = m.style ? m.style->sizePx : 0.0f;
-				pg.style = m.style;
-				pg.lineIndex = lineIndex;
-				pg.wordIndex = wordCounter ? wordCounter - 1 : 0;
-				pg.rtl = m.glyph.rtl;
-
-				// Shaping offsets position marks relative to their base glyph;
-				// y is negated because shaping is y-up and layout is y-down.
-				pg.x = penX + m.glyph.offsetX * pg.sizePx;
-				pg.y = baselineY - m.glyph.offsetY * pg.sizePx;
-
-				// Whitespace carries no outline, so it is measured but never
-				// emitted; skipping it here keeps animation ordinals counting
-				// only glyphs the viewer can actually see.
 				if (!m.glyph.whitespace) {
-					pg.ordinal = ordinal++;
+					PositionedGlyph pg;
+
+					pg.font = m.glyph.font;
+					pg.glyphIndex = m.glyph.glyphIndex;
+					pg.sizePx = m.style ? m.style->sizePx : 0.0f;
+					pg.style = m.style;
+					pg.lineIndex = lineIndex;
+					pg.wordIndex = words[index];
+					pg.ordinal = ordinals[index];
+					pg.textOffset = m.textOffset;
+
+					// Shaping is y-up and layout y-down, hence the negation.
+					pg.x = penX + m.glyph.offsetX * pg.sizePx;
+					pg.y = baselineY - m.glyph.offsetY * pg.sizePx;
+
 					result.glyphs.push_back(pg);
 				}
 
@@ -395,29 +438,23 @@ LayoutResult Layout::run(const Document &doc, float availableWidth)
 			closeSpan(underline, false, penX);
 			closeSpan(strikeout, true, penX);
 
-			info.glyphCount = result.glyphs.size() - info.firstGlyph;
 			result.lines.push_back(info);
-
-			// A justified line is stretched out to `limit` without its measured
-			// width changing, so it contributes the full limit to the extent.
-			result.width = std::max(result.width, justifyExtra > 0.0f ? limit : startX + line.width);
 
 			penY += lineHeight;
 			lineIndex++;
 		}
 
-		penY += block.spaceAfter;
+		penY += paragraph.spaceAfter;
 	}
 
-	result.height = penY;
 	result.wordCount = wordCounter;
+	result.width = limit;
+	result.height = penY;
 
-	// Vertical alignment shifts every baseline at once. Only meaningful when the
-	// box is taller than the text.
-	if (doc.sizeMode == SizeMode::Fixed && doc.valign != VAlign::Top) {
-		const float slack = doc.boxHeight - 2.0f * doc.padding - result.height;
+	if (availableHeight > 0.0f) {
+		const float slack = availableHeight - penY;
 
-		if (slack > 0.0f) {
+		if (slack > 0.0f && doc.valign != VAlign::Top) {
 			const float shift = doc.valign == VAlign::Middle ? slack * 0.5f : slack;
 
 			for (PositionedGlyph &g : result.glyphs)
@@ -429,6 +466,8 @@ LayoutResult Layout::run(const Document &doc, float availableWidth)
 			for (LineInfo &l : result.lines)
 				l.baselineY += shift;
 		}
+
+		result.height = availableHeight;
 	}
 
 	return result;

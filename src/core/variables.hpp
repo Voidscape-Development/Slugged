@@ -74,6 +74,10 @@ public:
 	// last expanded with, so it can skip re-expanding text that no global
 	// variable has touched.
 	static uint64_t generation();
+
+	// True once after any change since the last call, so the table can be
+	// written to disk shortly after it changes rather than only at shutdown.
+	static bool consumeUnsaved();
 };
 
 } // namespace slugged

@@ -54,6 +54,7 @@ std::mutex &globalMutex()
 
 VariableMap g_values;
 uint64_t g_generation = 0;
+uint64_t g_savedGeneration = 0;
 
 } // namespace
 
@@ -202,6 +203,18 @@ uint64_t GlobalVariables::generation()
 	std::lock_guard<std::mutex> lock(globalMutex());
 
 	return g_generation;
+}
+
+bool GlobalVariables::consumeUnsaved()
+{
+	std::lock_guard<std::mutex> lock(globalMutex());
+
+	if (g_savedGeneration == g_generation)
+		return false;
+
+	g_savedGeneration = g_generation;
+
+	return true;
 }
 
 } // namespace slugged

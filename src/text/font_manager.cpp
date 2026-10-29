@@ -22,23 +22,65 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #include FT_MULTIPLE_MASTERS_H
 #include FT_TRUETYPE_TABLES_H
-#include FT_SFNT_NAMES_H
+#include FT_TRUETYPE_TAGS_H
 
 #include <hb.h>
-#include <hb-ft.h>
 
 namespace slugged {
 
-FontFace::~FontFace()
+namespace {
+
+// Instances unused for this many rebuilds are closed, once there are more of
+// them than kInstanceBudget. A slider drag through a variable font's weight axis
+// creates an instance per step; they are cheap, but not free forever.
+constexpr uint64_t kIdleRebuilds = 600;
+constexpr size_t kInstanceBudget = 48;
+
+std::string tagToString(FT_ULong tag)
 {
-	if (hb)
-		hb_font_destroy(hb);
+	const char buf[5] = {
+		char((tag >> 24) & 0xFF), char((tag >> 16) & 0xFF), char((tag >> 8) & 0xFF), char(tag & 0xFF), 0,
+	};
+
+	return std::string(buf);
+}
+
+bool hasTable(FT_Face face, FT_ULong tag)
+{
+	FT_ULong length = 0;
+
+	return FT_Load_Sfnt_Table(face, tag, 0, nullptr, &length) == 0 && length > 0;
+}
+
+} // namespace
+
+FontFile::~FontFile()
+{
+	if (hbFace)
+		hb_face_destroy(hbFace);
 
 	if (ft)
 		FT_Done_Face(ft);
+}
+
+FontInstance::~FontInstance()
+{
+	if (hb)
+		hb_font_destroy(hb);
+}
+
+void FontInstance::select() const
+{
+	if (!file || coords.empty())
+		return;
+
+	std::vector<FT_Fixed> copy = coords;
+
+	FT_Set_Var_Design_Coordinates(file->ft, FT_UInt(copy.size()), copy.data());
 }
 
 FontManager &FontManager::instance()
@@ -58,8 +100,7 @@ FontManager::FontManager()
 
 FontManager::~FontManager()
 {
-	_cache.clear();
-	_faces.clear();
+	reset();
 
 	if (_ft)
 		FT_Done_FreeType(_ft);
@@ -67,240 +108,301 @@ FontManager::~FontManager()
 
 void FontManager::reset()
 {
-	std::lock_guard<std::mutex> lock(_mutex);
+	auto guard = lock();
 
-	_cache.clear();
-	_faces.clear();
-	_nextSlot = 0;
+	_specs.clear();
+	_fallbacks.clear();
+	_lastUsed.clear();
+	_instances.clear();
+	_files.clear();
 }
 
-static float tagValue(const FT_Var_Axis &axis)
+void FontManager::refresh()
 {
-	return float(axis.def) / 65536.0f;
+	auto guard = lock();
+
+	_specs.erase(std::remove_if(_specs.begin(), _specs.end(), [](const SpecEntry &e) { return e.missing; }),
+		     _specs.end());
+
+	_fallbacks.clear();
 }
 
-static std::string tagToString(FT_ULong tag)
+FontFile *FontManager::openFile(const std::string &path, int faceIndex)
 {
-	char buf[5] = {
-		char((tag >> 24) & 0xFF), char((tag >> 16) & 0xFF), char((tag >> 8) & 0xFF), char(tag & 0xFF), 0,
-	};
-
-	return std::string(buf);
-}
-
-void FontManager::applyVariations(FontFace &face, const FontSpec &spec)
-{
-	if (!face.variable || spec.axes.empty())
-		return;
-
-	FT_MM_Var *mm = nullptr;
-
-	if (FT_Get_MM_Var(face.ft, &mm) || !mm)
-		return;
-
-	std::vector<FT_Fixed> coords(mm->num_axis);
-
-	for (FT_UInt i = 0; i < mm->num_axis; i++) {
-		const std::string tag = tagToString(mm->axis[i].tag);
-
-		// Start from the axis default, then honour any explicit setting,
-		// clamped to what the font actually supports. An out-of-range request
-		// is clamped rather than rejected so a style shared between two fonts
-		// with different weight ranges still renders.
-		float value = tagValue(mm->axis[i]);
-
-		const auto it = spec.axes.find(tag);
-
-		if (it != spec.axes.end())
-			value = it->second;
-
-		const float lo = float(mm->axis[i].minimum) / 65536.0f;
-		const float hi = float(mm->axis[i].maximum) / 65536.0f;
-
-		value = std::min(std::max(value, lo), hi);
-
-		coords[i] = FT_Fixed(value * 65536.0f);
-	}
-
-	FT_Set_Var_Design_Coordinates(face.ft, mm->num_axis, coords.data());
-	FT_Done_MM_Var(_ft, mm);
-}
-
-FontFace *FontManager::openFace(const std::string &path, int faceIndex, const FontSpec &spec)
-{
-	if (!_ft)
+	if (!_ft || path.empty())
 		return nullptr;
 
-	auto face = std::make_unique<FontFace>();
+	for (const std::unique_ptr<FontFile> &f : _files)
+		if (f->path == path && f->faceIndex == faceIndex)
+			return f.get();
 
-	if (FT_New_Face(_ft, path.c_str(), faceIndex, &face->ft) || !face->ft) {
+	auto file = std::make_unique<FontFile>();
+
+	if (FT_New_Face(_ft, path.c_str(), faceIndex, &file->ft) || !file->ft) {
 		slugged_log(LOG_WARNING, "could not open font file '%s' (face %d)", path.c_str(), faceIndex);
 		return nullptr;
 	}
 
-	if (_nextSlot == 0xFF) {
-		slugged_log(LOG_WARNING, "font slot table is full (256 faces); '%s' will not render", path.c_str());
+	// HarfBuzz reads the file itself rather than going through FreeType, so
+	// shaping uses the font's own metrics tables and works for bitmap-only
+	// colour fonts, which FreeType cannot scale.
+	hb_blob_t *blob = hb_blob_create_from_file_or_fail(path.c_str());
+
+	if (!blob) {
+		slugged_log(LOG_WARNING, "could not read font file '%s'", path.c_str());
 		return nullptr;
 	}
 
-	face->slot = _nextSlot++;
-	face->path = path;
-	face->faceIndex = faceIndex;
+	file->hbFace = hb_face_create(blob, unsigned(faceIndex & 0xFFFF));
+	hb_blob_destroy(blob);
 
-	if (face->ft->family_name)
-		face->family = face->ft->family_name;
+	file->path = path;
+	file->faceIndex = faceIndex;
 
-	if (face->ft->style_name)
-		face->style = face->ft->style_name;
+	FT_Face ft = file->ft;
 
-	face->unitsPerEm = face->ft->units_per_EM ? float(face->ft->units_per_EM) : 1000.0f;
+	if (ft->family_name)
+		file->family = ft->family_name;
 
-	const float inv = 1.0f / face->unitsPerEm;
+	if (ft->style_name)
+		file->style = ft->style_name;
 
-	face->ascender = float(face->ft->ascender) * inv;
-	face->descender = std::fabs(float(face->ft->descender)) * inv;
+	file->unitsPerEm = ft->units_per_EM ? float(ft->units_per_EM) : 1000.0f;
 
-	const float lineSpacing = float(face->ft->height) * inv;
-	face->lineGap = std::max(0.0f, lineSpacing - (face->ascender + face->descender));
+	const float inv = 1.0f / file->unitsPerEm;
 
-	face->underlinePos = float(face->ft->underline_position) * inv;
-	face->underlineThickness = float(face->ft->underline_thickness) * inv;
+	file->ascender = float(ft->ascender) * inv;
+	file->descender = std::fabs(float(ft->descender)) * inv;
+	file->lineGap = std::max(0.0f, float(ft->height) * inv - (file->ascender + file->descender));
 
-	if (face->underlineThickness <= 0.0f)
-		face->underlineThickness = 0.05f;
+	// A bitmap-only face reports no scalable metrics at all.
+	if (file->ascender <= 0.0f && file->descender <= 0.0f) {
+		file->ascender = 0.95f;
+		file->descender = 0.25f;
+	}
 
-	// The strikeout bar lives in OS/2, which only TrueType/OpenType faces carry.
-	// Where it is missing the defaults on FontFace put the bar at a quarter of
-	// an em, which is close enough to the x-height middle for the faces that
-	// lack the table (mostly bitmap and Type 1).
-	if (const auto *os2 = static_cast<const TT_OS2 *>(FT_Get_Sfnt_Table(face->ft, FT_SFNT_OS2))) {
-		// version 0xFFFF marks a synthesised table with no usable values.
+	file->underlinePos = float(ft->underline_position) * inv;
+	file->underlineThickness = float(ft->underline_thickness) * inv;
+
+	if (file->underlineThickness <= 0.0f) {
+		file->underlinePos = -0.1f;
+		file->underlineThickness = 0.05f;
+	}
+
+	if (const auto *os2 = static_cast<const TT_OS2 *>(FT_Get_Sfnt_Table(ft, FT_SFNT_OS2))) {
+		// Version 0xFFFF marks a synthesised table with no usable values.
 		if (os2->version != 0xFFFF && os2->yStrikeoutSize > 0) {
-			face->strikeoutPos = float(os2->yStrikeoutPosition) * inv;
-			face->strikeoutThickness = float(os2->yStrikeoutSize) * inv;
+			file->strikeoutPos = float(os2->yStrikeoutPosition) * inv;
+			file->strikeoutThickness = float(os2->yStrikeoutSize) * inv;
 		}
 	}
 
-	face->hasColor = FT_HAS_COLOR(face->ft) != 0;
-	face->variable = FT_HAS_MULTIPLE_MASTERS(face->ft) != 0;
+	file->hasColorLayers = hasTable(ft, FT_MAKE_TAG('C', 'O', 'L', 'R'));
+	file->hasColorBitmaps = hasTable(ft, FT_MAKE_TAG('C', 'B', 'D', 'T')) || hasTable(ft, FT_MAKE_TAG('s', 'b', 'i', 'x'));
+	file->variable = FT_HAS_MULTIPLE_MASTERS(ft) != 0;
 
-	applyVariations(*face, spec);
-
-	// hb-ft reads glyph metrics through FreeType's *scaled* metrics, which are
-	// all zero until a size is set on the face. Setting the size to one em
-	// (in 26.6 fixed point) makes FreeType report metrics in font units, which
-	// is exactly the space hb_font_set_scale is told to use below. Without this
-	// every advance comes back as zero and all glyphs stack at the origin.
-	//
-	// Outlining is unaffected: atlas_cache loads glyphs with FT_LOAD_NO_SCALE,
-	// which ignores the char size entirely.
-	FT_Set_Char_Size(face->ft, 0, FT_F26Dot6(face->ft->units_per_EM) * 64, 72, 72);
-
-	// HarfBuzz is created after variations so it shapes against the same
-	// instance FreeType will outline. hb_ft_font_create_referenced keeps its own
-	// reference, so face teardown order does not matter.
-	face->hb = hb_ft_font_create_referenced(face->ft);
-
-	if (face->hb) {
-		// HarfBuzz positions are expressed in units where `scale` equals one
-		// em, so dividing by the scale gives an em fraction regardless of what
-		// units FreeType happened to report in. Reading the scale back rather
-		// than assuming it keeps this correct across HarfBuzz versions and
-		// avoids a hard-coded 26.6 conversion factor.
-		int scaleX = 0;
-		int scaleY = 0;
-
-		hb_font_get_scale(face->hb, &scaleX, &scaleY);
-
-		face->hbScaleX = scaleX ? float(scaleX) : face->unitsPerEm;
-		face->hbScaleY = scaleY ? float(scaleY) : face->unitsPerEm;
-	}
-
-	FontFace *raw = face.get();
-	_faces.push_back(std::move(face));
+	FontFile *raw = file.get();
+	_files.push_back(std::move(file));
 
 	return raw;
 }
 
-FontFace *FontManager::acquire(const FontSpec &spec)
+FontInstance *FontManager::instanceFor(FontFile *file, const FontSpec &spec)
 {
-	std::lock_guard<std::mutex> lock(_mutex);
+	if (!file)
+		return nullptr;
 
-	for (const Entry &e : _cache)
-		if (e.spec == spec)
-			return e.face;
+	std::vector<FT_Fixed> coords;
 
-	FontFace *face = nullptr;
+	if (file->variable) {
+		FT_MM_Var *mm = nullptr;
+
+		if (!FT_Get_MM_Var(file->ft, &mm) && mm) {
+			coords.resize(mm->num_axis);
+
+			// Start from the coordinates the face opened with, which carry a
+			// named instance's settings when the matcher picked one.
+			std::vector<FT_Fixed> current(mm->num_axis);
+
+			const bool haveCurrent =
+				FT_Get_Var_Design_Coordinates(file->ft, mm->num_axis, current.data()) == 0;
+
+			for (FT_UInt i = 0; i < mm->num_axis; i++) {
+				const FT_Var_Axis &axis = mm->axis[i];
+				const std::string tag = tagToString(axis.tag);
+
+				float value = float(haveCurrent ? current[i] : axis.def) / 65536.0f;
+
+				// The style's weight drives a variable font's weight axis, so
+				// "Semibold" means the same thing for static and variable
+				// families.
+				if (tag == "wght")
+					value = float(spec.weight);
+
+				const auto it = spec.axes.find(tag);
+
+				if (it != spec.axes.end())
+					value = it->second;
+
+				const float lo = float(axis.minimum) / 65536.0f;
+				const float hi = float(axis.maximum) / 65536.0f;
+
+				coords[i] = FT_Fixed(std::lround(std::clamp(value, lo, hi) * 65536.0f));
+			}
+
+			FT_Done_MM_Var(_ft, mm);
+		}
+	}
+
+	for (const std::unique_ptr<FontInstance> &inst : _instances)
+		if (inst->file == file && inst->coords == coords)
+			return inst.get();
+
+	auto inst = std::make_unique<FontInstance>();
+
+	inst->file = file;
+	inst->id = _nextId++;
+	inst->coords = coords;
+	inst->hb = hb_font_create(file->hbFace);
+
+	hb_font_set_scale(inst->hb, int(file->unitsPerEm), int(file->unitsPerEm));
+
+	if (!coords.empty()) {
+		std::vector<float> design(coords.size());
+
+		for (size_t i = 0; i < coords.size(); i++)
+			design[i] = float(coords[i]) / 65536.0f;
+
+		hb_font_set_var_coords_design(inst->hb, design.data(), unsigned(design.size()));
+	}
+
+	FontInstance *raw = inst.get();
+	_instances.push_back(std::move(inst));
+
+	return raw;
+}
+
+FontInstance *FontManager::acquire(const FontSpec &spec)
+{
+	auto guard = lock();
+
+	for (const SpecEntry &e : _specs) {
+		if (e.spec == spec) {
+			if (e.instance)
+				_lastUsed[e.instance->id] = _rebuild;
+
+			return e.instance;
+		}
+	}
+
+	SpecEntry entry;
+	entry.spec = spec;
+
+	FontFile *file = nullptr;
 
 	// An explicit file always wins: that is what makes a scene collection
 	// portable to a machine where the font was never installed.
 	if (!spec.file.empty())
-		face = openFace(spec.file, spec.faceIndex, spec);
+		file = openFile(spec.file, spec.faceIndex);
 
-	if (!face) {
+	const std::string family = spec.family.empty() ? fontenum::defaultFamily() : spec.family;
+
+	if (!file) {
 		FontFileRef ref;
 
-		if (fontenum::match(spec.family, spec.weight, spec.italic, ref))
-			face = openFace(ref.path, ref.faceIndex, spec);
+		if (fontenum::match(family, spec.weight, spec.italic, ref))
+			file = openFile(ref.path, ref.faceIndex);
 	}
 
-	if (!face) {
+	if (!file) {
+		entry.missing = true;
+
 		FontFileRef ref;
 
 		if (fontenum::match(fontenum::defaultFamily(), spec.weight, spec.italic, ref)) {
-			slugged_log(LOG_WARNING, "font '%s' not found; falling back to '%s'", spec.family.c_str(),
+			slugged_log(LOG_WARNING, "font '%s' not found; using '%s'", family.c_str(),
 				    fontenum::defaultFamily().c_str());
 
-			face = openFace(ref.path, ref.faceIndex, spec);
+			file = openFile(ref.path, ref.faceIndex);
 		}
 	}
 
-	// Cache negative results too, so a missing font does not re-run platform
-	// enumeration on every single layout pass.
-	_cache.push_back(Entry{spec, face});
+	entry.instance = instanceFor(file, spec);
 
-	return face;
+	if (entry.instance)
+		_lastUsed[entry.instance->id] = _rebuild;
+
+	_specs.push_back(entry);
+
+	return entry.instance;
 }
 
-FontFace *FontManager::fallbackFor(const FontSpec &spec, uint32_t codepoint)
+bool FontManager::isEmoji(uint32_t cp)
 {
-	{
-		std::lock_guard<std::mutex> lock(_mutex);
+	return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x1F1E6 && cp <= 0x1F1FF) || cp == 0x1F004 ||
+	       cp == 0x1F0CF || cp == 0x1F18E || (cp >= 0x1F191 && cp <= 0x1F19A);
+}
 
-		// A face already open that covers the codepoint is always preferable to
-		// opening another file.
-		for (const std::unique_ptr<FontFace> &f : _faces)
-			if (FT_Get_Char_Index(f->ft, codepoint))
-				return f.get();
+FontInstance *FontManager::fallbackFor(const FontSpec &spec, uint32_t codepoint, bool preferColor)
+{
+	auto guard = lock();
+
+	const FallbackKey key{codepoint, spec.family, spec.weight, spec.italic, preferColor};
+
+	auto it = _fallbacks.find(key);
+
+	if (it == _fallbacks.end()) {
+		std::pair<std::string, int> chosen;
+		std::pair<std::string, int> firstCovering;
+
+		for (const FontFileRef &ref : fontenum::fallbacks(codepoint, spec.family)) {
+			FontFile *file = openFile(ref.path, ref.faceIndex);
+
+			if (!file || !FT_Get_Char_Index(file->ft, codepoint))
+				continue;
+
+			if (firstCovering.first.empty())
+				firstCovering = {ref.path, ref.faceIndex};
+
+			if (!preferColor || file->hasColorLayers || file->hasColorBitmaps) {
+				chosen = {ref.path, ref.faceIndex};
+				break;
+			}
+		}
+
+		if (chosen.first.empty())
+			chosen = firstCovering;
+
+		it = _fallbacks.emplace(key, chosen).first;
 	}
 
-	for (const FontFileRef &ref : fontenum::fallbacks(codepoint, spec.family)) {
-		FontSpec fallbackSpec = spec;
-		fallbackSpec.family.clear();
-		fallbackSpec.file = ref.path;
-		fallbackSpec.faceIndex = ref.faceIndex;
+	if (it->second.first.empty())
+		return nullptr;
 
-		FontFace *face = acquire(fallbackSpec);
+	FontSpec fallback;
 
-		if (face && FT_Get_Char_Index(face->ft, codepoint))
-			return face;
-	}
+	fallback.file = it->second.first;
+	fallback.faceIndex = it->second.second;
+	fallback.weight = spec.weight;
+	fallback.italic = spec.italic;
 
-	return nullptr;
+	return acquire(fallback);
 }
 
 std::vector<FontAxis> FontManager::axesOf(const FontSpec &spec)
 {
+	auto guard = lock();
+
 	std::vector<FontAxis> out;
 
-	FontFace *face = acquire(spec);
+	FontInstance *inst = acquire(spec);
 
-	if (!face || !face->variable)
+	if (!inst || !inst->file->variable)
 		return out;
 
 	FT_MM_Var *mm = nullptr;
 
-	if (FT_Get_MM_Var(face->ft, &mm) || !mm)
+	if (FT_Get_MM_Var(inst->file->ft, &mm) || !mm)
 		return out;
 
 	for (FT_UInt i = 0; i < mm->num_axis; i++) {
@@ -318,6 +420,60 @@ std::vector<FontAxis> FontManager::axesOf(const FontSpec &spec)
 	FT_Done_MM_Var(_ft, mm);
 
 	return out;
+}
+
+std::vector<uint32_t> FontManager::collect()
+{
+	auto guard = lock();
+
+	_rebuild++;
+
+	std::vector<uint32_t> evicted;
+
+	if (_instances.size() <= kInstanceBudget)
+		return evicted;
+
+	std::set<const FontInstance *> doomed;
+
+	for (const std::unique_ptr<FontInstance> &inst : _instances) {
+		const auto used = _lastUsed.find(inst->id);
+		const uint64_t last = used == _lastUsed.end() ? 0 : used->second;
+
+		if (last + kIdleRebuilds < _rebuild)
+			doomed.insert(inst.get());
+	}
+
+	if (doomed.empty())
+		return evicted;
+
+	_specs.erase(std::remove_if(_specs.begin(), _specs.end(),
+				    [&](const SpecEntry &e) { return doomed.count(e.instance) > 0; }),
+		     _specs.end());
+
+	_instances.erase(std::remove_if(_instances.begin(), _instances.end(),
+					[&](const std::unique_ptr<FontInstance> &inst) {
+						if (!doomed.count(inst.get()))
+							return false;
+
+						evicted.push_back(inst->id);
+						_lastUsed.erase(inst->id);
+						return true;
+					}),
+			 _instances.end());
+
+	// Close files nothing refers to any more.
+	_files.erase(std::remove_if(_files.begin(), _files.end(),
+				    [&](const std::unique_ptr<FontFile> &file) {
+					    for (const std::unique_ptr<FontInstance> &inst : _instances)
+						    if (inst->file == file.get())
+							    return false;
+
+					    return true;
+				    }),
+		     _files.end());
+
+	// Fallback answers name files by path, so they survive the file closing.
+	return evicted;
 }
 
 } // namespace slugged
