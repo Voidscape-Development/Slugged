@@ -17,6 +17,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "host_tokens.hpp"
+#include "settings.hpp"
 
 #include <cstdio>
 #include <mutex>
@@ -74,6 +75,7 @@ struct State {
 	uint64_t generation = 0;
 
 	float accumulator = kSampleInterval;
+	float saveAccumulator = 0.0f;
 
 	os_cpu_usage_info_t *cpu = nullptr;
 
@@ -212,6 +214,8 @@ void frontendEvent(enum obs_frontend_event event, void *)
 
 #endif // SLUGGED_HAVE_FRONTEND
 
+void tick(void *, float seconds);
+
 } // namespace
 
 void startup()
@@ -228,10 +232,15 @@ void startup()
 #ifdef SLUGGED_HAVE_FRONTEND
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 #endif
+
+	// Once per frame for the whole process, however many sources there are.
+	obs_add_tick_callback(tick, nullptr);
 }
 
 void shutdown()
 {
+	obs_remove_tick_callback(tick, nullptr);
+
 #ifdef SLUGGED_HAVE_FRONTEND
 	obs_frontend_remove_event_callback(frontendEvent, nullptr);
 #endif
@@ -256,11 +265,27 @@ void shutdown()
 	s.generation++;
 }
 
-void tick(float seconds)
+namespace {
+
+void tick(void *, float seconds)
 {
 	State &s = state();
 
-	std::lock_guard<std::mutex> lock(s.mutex);
+	std::unique_lock<std::mutex> lock(s.mutex);
+
+	// The shared variable table is written shortly after it changes rather
+	// than only at shutdown, so a crash does not lose what a script set.
+	s.saveAccumulator += seconds;
+
+	if (s.saveAccumulator >= 2.0f) {
+		s.saveAccumulator = 0.0f;
+
+		if (GlobalVariables::consumeUnsaved()) {
+			lock.unlock();
+			settings::saveGlobalVariables();
+			lock.lock();
+		}
+	}
 
 	s.accumulator += seconds;
 
@@ -328,6 +353,8 @@ void tick(float seconds)
 
 	publish(s, std::move(next));
 }
+
+} // namespace
 
 VariableMap values()
 {

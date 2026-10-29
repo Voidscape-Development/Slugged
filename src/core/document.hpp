@@ -27,46 +27,51 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 namespace slugged {
 
-// A maximal span of text sharing one Style. Text is UTF-8 throughout.
+// A span of text sharing one set of style overrides. Text is UTF-8 throughout.
 struct Run {
 	std::string text;
-	Style style;
+	StyleOverride style;
+
+	bool operator==(const Run &) const = default;
 };
 
-// A paragraph. Blocks break lines independently and stack vertically.
+// A paragraph. Paragraphs break lines independently and stack vertically.
 struct Block {
 	std::vector<Run> runs;
+	ParagraphOverride paragraph;
 
-	HAlign align = HAlign::Left;
-	Direction direction = Direction::Auto;
+	std::string plainText() const;
+	size_t size() const;
 
-	// Multiple of the font's own line height; 1.0 uses the font's metrics
-	// unchanged.
-	float lineHeight = 1.0f;
-
-	float spaceBefore = 0.0f;
-	float spaceAfter = 0.0f;
-
-	std::string plainText() const
-	{
-		std::string out;
-
-		for (const Run &r : runs)
-			out += r.text;
-
-		return out;
-	}
+	bool operator==(const Block &) const = default;
 };
 
 // How the source decides its own width and height.
 enum class SizeMode {
-	// Grow to fit the text exactly (the GDI+ default).
+	// Grow to fit the text, its outline and its shadow (the GDI+ default).
 	Auto,
-	// Fixed box; text wraps inside it and may be clipped.
+	// Fixed box; text wraps inside it and is clipped to it.
 	Fixed,
 };
+SLUGGED_ENUM_TRAITS(SizeMode, {SizeMode::Auto, "auto"}, {SizeMode::Fixed, "fixed"})
 
+struct Background {
+	bool enabled = false;
+	Rgba color{0.0f, 0.0f, 0.0f, 0.5f};
+	float radius = 0.0f;
+
+	bool operator==(const Background &) const = default;
+};
+
+// The full description of what a source draws.
+//
+// Offsets into a document are UTF-8 byte offsets into plainText(), where each
+// paragraph break counts as one byte ('\n').
 struct Document {
+	// The style every character starts from. Runs only record where they differ.
+	Style base;
+	ParagraphStyle paragraph;
+
 	std::vector<Block> blocks;
 
 	SizeMode sizeMode = SizeMode::Auto;
@@ -78,90 +83,74 @@ struct Document {
 	WrapMode wrap = WrapMode::Word;
 	VAlign valign = VAlign::Top;
 
-	// Inner padding in px, applied on every side. Keeps outlines and shadows
-	// from being clipped by the source's own bounds in Auto mode.
+	// Inner padding in px on every side.
 	float padding = 0.0f;
 
-	// Background fill behind the whole box, drawn as a plain quad.
-	bool backgroundEnabled = false;
-	Rgba backgroundColor{0.0f, 0.0f, 0.0f, 0.5f};
-	float backgroundRadius = 0.0f;
-
+	Background background;
 	MotionSpec motion;
 	ScrollSpec scroll;
 
-	// Global opacity multiplier, applied in the pixel shader.
+	// Whole-source opacity, applied once in the pixel shader.
 	float opacity = 1.0f;
 
-	// ---- convenience -----------------------------------------------------
+	bool operator==(const Document &) const = default;
 
-	// The document's text with block breaks as newlines. This is what the flat
-	// `text` source property mirrors, so obs-websocket and scripts can read and
-	// write a Slugged source exactly like a GDI+ one.
-	std::string plainText() const
-	{
-		std::string out;
+	// ---- text ------------------------------------------------------------
 
-		for (size_t i = 0; i < blocks.size(); i++) {
-			if (i)
-				out += '\n';
+	// Paragraphs joined by '\n'. This is what the flat `text` property mirrors.
+	std::string plainText() const;
+	size_t size() const;
+	bool empty() const;
 
-			out += blocks[i].plainText();
-		}
+	// Replaces [start, end) with `text`, which may contain newlines. Inserted
+	// characters take the style of the character before them (or after, at the
+	// start of a paragraph), so typing extends whatever the cursor sits in.
+	void replaceText(size_t start, size_t end, const std::string &text);
 
-		return out;
-	}
-
-	// Replaces all content with `text`, splitting on newlines, while preserving
-	// the styling of the first run of each existing block where one exists.
-	// This is the path a script or obs-websocket takes when it sets `text`: the
-	// look the user built in the editor survives, only the words change.
+	// Replaces the whole text with the minimal edit that produces `text`, so the
+	// styling of every character that did not change survives. This is the path
+	// a script or obs-websocket takes when it sets `text`.
 	void setPlainText(const std::string &text);
 
 	// Rewrites every run's text through `expand`, leaving the run structure --
 	// and therefore every per-character style -- exactly as it was. Returns true
-	// when any run changed.
-	//
-	// This is what token expansion goes through. Routing it through
-	// setPlainText() instead would collapse each line back to a single run,
-	// which silently flattened the styling of any source that contained so much
-	// as a {time}.
-	//
-	// A token has to sit inside one run to be recognised: styling half of
-	// "{time}" differently from the other half splits it in two and neither half
-	// resolves. That is the same rule as every other rich-text templating
-	// system, and the editor never splits a run the user did not select.
+	// when any run changed. A token has to sit inside one run to be recognised.
 	bool expandTokens(const std::function<std::string(const std::string &)> &expand);
 
-	// The style new content inherits when the document has no runs at all.
-	Style defaultStyle;
+	// ---- styling ---------------------------------------------------------
 
-	// True when there is nothing to render.
-	bool empty() const
-	{
-		for (const Block &b : blocks)
-			for (const Run &r : b.runs)
-				if (!r.text.empty())
-					return false;
+	// Sets the fields of `delta` on every character in [start, end).
+	void applyStyle(size_t start, size_t end, const StyleOverride &delta);
 
-		return true;
-	}
+	// Sets the fields of `delta` on the base style and removes them from every
+	// run, so the whole text takes them.
+	void applyBaseStyle(const StyleOverride &delta);
 
-	// Every distinct style in document order; used by the atlas cache to decide
-	// which faces to load before layout runs.
-	std::vector<const Style *> styles() const
-	{
-		std::vector<const Style *> out;
+	// Removes all of the overrides in [start, end).
+	void clearStyle(size_t start, size_t end);
 
-		for (const Block &b : blocks)
-			for (const Run &r : b.runs)
-				out.push_back(&r.style);
+	// The fully resolved style of the character at `offset`, or of the
+	// character before it when `offset` is at a run's end ("the style typing
+	// would continue").
+	Style styleAt(size_t offset) const;
 
-		return out;
-	}
+	// Paragraph settings for every paragraph [start, end) touches.
+	void applyParagraph(size_t start, size_t end, const ParagraphOverride &delta);
+	void applyBaseParagraph(const ParagraphOverride &delta);
+	ParagraphStyle paragraphAt(size_t offset) const;
+
+	// Merges adjacent runs with identical overrides and drops empty runs.
+	void normalize();
+
+	// The fully resolved style of a run.
+	Style resolve(const Run &run) const { return run.style.resolve(base); }
+	ParagraphStyle resolve(const Block &block) const { return block.paragraph.resolve(paragraph); }
 };
 
-// Splits UTF-8 `text` on '\n', returning at least one (possibly empty) piece.
+// Splits `text` on '\n' (dropping '\r'), returning at least one piece.
 std::vector<std::string> splitLines(const std::string &text);
+
+// Moves `offset` back to the start of the UTF-8 sequence it points into.
+size_t utf8Floor(const std::string &text, size_t offset);
 
 } // namespace slugged

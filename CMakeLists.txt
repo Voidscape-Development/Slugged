@@ -11,6 +11,10 @@ project(${_name} VERSION ${_version})
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
 
+if(ENABLE_QT AND NOT ENABLE_FRONTEND_API)
+  message(FATAL_ERROR "ENABLE_QT requires ENABLE_FRONTEND_API: the editor parents itself to OBS's main window")
+endif()
+
 include(compilerconfig)
 include(defaults)
 include(helpers)
@@ -53,8 +57,6 @@ endif()
 # in obs-deps on Windows and macOS, so the system copy is preferred and only
 # fetched when missing.
 # --------------------------------------------------------------------------
-
-include(FetchContent)
 
 set(SLUGGED_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
 
@@ -117,6 +119,13 @@ foreach(_slugged_dep IN ITEMS slughorn harfbuzz SheenBidi)
   endif()
 endforeach()
 
+# slughorn adds its own -Werror (/WX on MSVC) as a plain compile option, which the
+# property above cannot remove. OBS's warning set includes flags slughorn is not
+# built against, so demote those warnings back to warnings for it.
+if(TARGET slughorn)
+  target_compile_options(slughorn PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX-,-Wno-error>)
+endif()
+
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype)
 
 # fontconfig is the font-enumeration backend on Linux only; Windows uses
@@ -154,6 +163,8 @@ target_sources(
     src/util/log.hpp
     src/core/document.cpp
     src/core/document.hpp
+    src/core/markup.cpp
+    src/core/markup.hpp
     src/core/text_feed.cpp
     src/core/text_feed.hpp
     src/core/tokens.cpp
@@ -167,14 +178,22 @@ target_sources(
     src/text/font_manager.hpp
     src/text/layout.cpp
     src/text/layout.hpp
+    src/text/line_break.cpp
+    src/text/line_break.hpp
     src/text/shaper.cpp
     src/text/shaper.hpp
     src/render/atlas_cache.cpp
     src/render/atlas_cache.hpp
+    src/render/frame.cpp
+    src/render/frame.hpp
     src/render/geometry.cpp
     src/render/geometry.hpp
+    src/render/rebuild_worker.cpp
+    src/render/rebuild_worker.hpp
     src/render/renderer.cpp
     src/render/renderer.hpp
+    src/render/shape_cache.cpp
+    src/render/shape_cache.hpp
     src/obs/editor_bridge.hpp
     src/obs/host_tokens.cpp
     src/obs/host_tokens.hpp
@@ -193,6 +212,7 @@ if(ENABLE_QT)
     PRIVATE
       src/ui/color_button.cpp
       src/ui/color_button.hpp
+      src/ui/convert_dialog.cpp
       src/ui/editor_window.cpp
       src/ui/editor_window.hpp
       src/ui/preview_widget.cpp

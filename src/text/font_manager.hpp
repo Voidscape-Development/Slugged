@@ -21,31 +21,26 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "../core/types.hpp"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+struct hb_face_t;
 struct hb_font_t;
 
 namespace slugged {
 
-// One resolved, opened font face.
-//
-// `slot` is the piece that matters to the renderer: slughorn's Key packs a
-// 21-bit value plus an 8-bit caller-defined mask, so a face's slot becomes that
-// mask and glyph indices become the value. Two faces can then contribute the
-// same glyph index to one atlas without aliasing. 8 bits caps a single atlas at
-// 256 distinct faces, which is far past what a text source realistically mixes;
-// past that, allocation fails loudly rather than silently colliding.
-struct FontFace {
+// One opened font file (or one face of a collection). Shared by every instance
+// of it, whatever its variation settings.
+struct FontFile {
 	FT_Face ft = nullptr;
-	hb_font_t *hb = nullptr;
-
-	uint8_t slot = 0;
+	hb_face_t *hbFace = nullptr;
 
 	std::string path;
 	int faceIndex = 0;
@@ -53,38 +48,54 @@ struct FontFace {
 	std::string family;
 	std::string style;
 
-	// HarfBuzz's positional scale for this face: the number of shaping units
-	// that make up one em. Shaped advances are divided by this to reach em
-	// space.
-	float hbScaleX = 1000.0f;
-	float hbScaleY = 1000.0f;
-
-	// Ratios of the em square, from the face's own metrics.
 	float unitsPerEm = 1000.0f;
+
+	// Ratios of the em square.
 	float ascender = 0.8f;
 	float descender = 0.2f;
 	float lineGap = 0.0f;
 	float underlinePos = -0.1f;
 	float underlineThickness = 0.05f;
-
-	// Strikeout bar, from the face's OS/2 table where it has one. Positive is
-	// above the baseline, matching FreeType's y-up sign convention.
 	float strikeoutPos = 0.25f;
 	float strikeoutThickness = 0.05f;
 
-	// True when the face carries COLR/CPAL colour layers.
-	bool hasColor = false;
+	// Colour layers (COLR/CPAL) and colour bitmaps (CBDT/sbix).
+	bool hasColorLayers = false;
+	bool hasColorBitmaps = false;
 
-	// True when the face exposes variation axes.
 	bool variable = false;
 
 	float defaultLineHeight() const { return ascender + descender + lineGap; }
 
-	~FontFace();
+	FontFile() = default;
+	FontFile(const FontFile &) = delete;
+	FontFile &operator=(const FontFile &) = delete;
+	~FontFile();
+};
 
-	FontFace() = default;
-	FontFace(const FontFace &) = delete;
-	FontFace &operator=(const FontFace &) = delete;
+// A font file at one set of variation coordinates. This is what shaping and
+// outline extraction work with.
+//
+// `id` is unique for the life of the process and never reused, so caches keyed
+// on it can never confuse a closed instance with a newer one.
+struct FontInstance {
+	FontFile *file = nullptr;
+	hb_font_t *hb = nullptr;
+
+	uint32_t id = 0;
+
+	// Design coordinates in FreeType's 16.16 format, one per axis. Empty for a
+	// static font.
+	std::vector<FT_Fixed> coords;
+
+	// Puts this instance's coordinates on the shared FT_Face before an outline
+	// is loaded. Requires the manager's lock.
+	void select() const;
+
+	FontInstance() = default;
+	FontInstance(const FontInstance &) = delete;
+	FontInstance &operator=(const FontInstance &) = delete;
+	~FontInstance();
 };
 
 // A variation axis exposed by a variable font, in the font's own units.
@@ -96,9 +107,12 @@ struct FontAxis {
 	float defaultValue = 0.0f;
 };
 
-// Owns the FreeType library and every opened face. One instance is shared by
-// all sources so two sources using the same font share one FT_Face and one
-// atlas slot.
+// Owns the FreeType library and every opened font. One instance is shared by all
+// sources.
+//
+// FreeType faces are not thread-safe, so everything that touches one happens
+// under lock(). The source pipeline runs on a single worker thread that holds the
+// lock for a whole rebuild; the editor takes it briefly to read axis ranges.
 class FontManager {
 public:
 	static FontManager &instance();
@@ -106,43 +120,66 @@ public:
 	FontManager();
 	~FontManager();
 
-	// Resolves a FontSpec to an open face, opening and caching as needed.
-	// Returns nullptr only when neither the requested font nor any fallback
-	// could be opened at all.
-	FontFace *acquire(const FontSpec &spec);
+	std::unique_lock<std::recursive_mutex> lock() { return std::unique_lock<std::recursive_mutex>(_mutex); }
 
-	// The face used when `spec` has no glyph for `codepoint`. Walks the
-	// platform's fallback list, then any face already open, and returns nullptr
-	// when nothing covers the codepoint.
-	FontFace *fallbackFor(const FontSpec &spec, uint32_t codepoint);
+	// Resolves a FontSpec to an instance, opening and caching as needed. Returns
+	// nullptr only when neither the requested font nor the platform default
+	// could be opened.
+	FontInstance *acquire(const FontSpec &spec);
 
-	// Variation axes of the face `spec` resolves to. Empty for static fonts.
+	// The instance that should render `codepoint` when `spec` lacks it. The
+	// answer depends only on the request, never on what else happens to be
+	// open, so a source renders the same whatever other sources loaded.
+	// `preferColor` picks a colour font over a monochrome one that also covers
+	// the character, which is what an emoji should look like.
+	FontInstance *fallbackFor(const FontSpec &spec, uint32_t codepoint, bool preferColor = false);
+
+	// Variation axes of the font `spec` resolves to. Empty for static fonts.
 	std::vector<FontAxis> axesOf(const FontSpec &spec);
 
-	// Clears every cached face. Only safe when no layout is in flight; the
-	// editor calls it after the user installs a font mid-session.
+	// True for characters that are emoji by default rather than only when
+	// followed by U+FE0F.
+	static bool isEmoji(uint32_t codepoint);
+
+	// Marks the start of a rebuild. Instances unused for a long while are closed
+	// here, and their ids returned so caches built on them can drop them too.
+	// Only call with no layout in flight.
+	std::vector<uint32_t> collect();
+
+	// Forgets every "font not found" answer, so a font installed while OBS is
+	// running is picked up.
+	void refresh();
+
+	// Closes everything. Only at module unload.
 	void reset();
 
 private:
-	FontFace *openFace(const std::string &path, int faceIndex, const FontSpec &spec);
-	void applyVariations(FontFace &face, const FontSpec &spec);
+	FontFile *openFile(const std::string &path, int faceIndex);
+	FontInstance *instanceFor(FontFile *file, const FontSpec &spec);
 
 	FT_Library _ft = nullptr;
 
-	std::mutex _mutex;
-	std::vector<std::unique_ptr<FontFace>> _faces;
+	std::recursive_mutex _mutex;
 
-	// Cache key is the full spec including axis settings: two different weight
-	// axis values on one variable file are genuinely different faces to
-	// FreeType, since the variation is applied to the FT_Face itself.
-	struct Entry {
+	std::vector<std::unique_ptr<FontFile>> _files;
+	std::vector<std::unique_ptr<FontInstance>> _instances;
+
+	struct SpecEntry {
 		FontSpec spec;
-		FontFace *face;
+		FontInstance *instance = nullptr;
+		bool missing = false;
 	};
 
-	std::vector<Entry> _cache;
+	std::vector<SpecEntry> _specs;
 
-	uint8_t _nextSlot = 0;
+	// (codepoint, family, weight, italic) -> chosen fallback file, or none.
+	using FallbackKey = std::tuple<uint32_t, std::string, int, bool, bool>;
+	std::map<FallbackKey, std::pair<std::string, int>> _fallbacks;
+
+	// Last rebuild each instance was used in, for collect().
+	std::map<uint32_t, uint64_t> _lastUsed;
+	uint64_t _rebuild = 0;
+	uint32_t _nextId = 1;
 };
 
 } // namespace slugged

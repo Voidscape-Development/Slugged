@@ -1,0 +1,24 @@
+name: Unit Tests
+on:
+  workflow_call:
+jobs:
+  unit-tests:
+    name: Unit Tests 🧪
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Dependencies 📦
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libfreetype-dev libfontconfig-dev fonts-dejavu-core fonts-noto-color-emoji
+
+      - name: Build Tests 🧱
+        run: |
+          cmake -S tests -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-tests
+
+      - name: Run Tests 🧪
+        run: ctest --test-dir build-tests --output-on-failure

@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include "../core/document.hpp"
+#include "../core/text_feed.hpp"
 #include "../core/variables.hpp"
 
 #include <obs-module.h>
@@ -29,98 +30,82 @@ namespace slugged {
 
 // Bridges the document model to OBS's settings store.
 //
-// The rich document is the canonical form and lives under the "document" key.
-// Alongside it sit flat, GDI+-shaped properties (text, font, colour, outline,
-// alignment). Those exist so that everything already built around OBS text
-// sources keeps working: obs-websocket, Lua and Python scripts, and Streamer.bot
-// all set a plain `text` string, and the properties dialog stays usable without
-// opening the editor.
+// There is exactly one place each value lives:
 //
-// The two are kept coherent by only writing a flat property back into the
-// document when that property actually changed, which is what SettingsSnapshot
-// tracks. Without it, every update() would flatten per-run styling the editor
-// had applied.
+//   - The base style, paragraph defaults, layout, motion and scrolling are
+//     top-level settings keys. They are what the properties dialog shows and
+//     edits, what obs-websocket's SetInputSettings writes, and what the editor
+//     writes when nothing is selected.
+//   - Per-character styling lives under "content" as runs that record only the
+//     fields they override. Changing the base never touches it, so styling one
+//     word in the editor survives any change made from anywhere else.
+//   - "text" is the plain text. The content's text is kept equal to it; when
+//     something outside the editor changes "text", the content is updated with
+//     a minimal edit so the unchanged characters keep their styling.
 //
-// The flat mirror is lossy -- it can only describe one style for the whole
-// source -- so the document wins whenever it is the thing that just changed.
-// `documentRevision` is what makes that decidable: save() bumps it, and an
-// update carrying a revision the snapshot has not seen is one where the
-// document is authoritative and the flat properties are only a readout of it.
+// Enumerations are stored as strings ("fade", "center"), never as numbers.
+// "schema" records the layout version, so older settings are migrated once.
 namespace settings {
 
-// Values of the flat properties as of the last update, so the next update can
-// tell which of them the user actually touched.
-struct SettingsSnapshot {
+constexpr int kSchemaVersion = 2;
+
+// Where a source's text comes from.
+enum class SourceMode { Text, File };
+
+// Everything update() reads, resolved into one immutable value.
+struct SourceConfig {
+	Document document;
+
+	// The raw `text` value: markup when `markup` is set.
 	std::string text;
-	std::string fontFace;
-	std::string fontStyle;
-	int fontSize = 64;
-	uint32_t fontFlags = 0;
-	uint32_t color = 0xFFFFFFFF;
-	int opacity = 100;
-	bool outline = false;
-	int outlineSize = 2;
-	uint32_t outlineColor = 0xFF000000;
-	bool shadow = false;
-	double shadowX = 2.0;
-	double shadowY = 2.0;
-	uint32_t shadowColor = 0x80000000;
-	int align = 0;
-	int valign = 0;
-	bool background = false;
-	uint32_t backgroundColor = 0x80000000;
-	bool extents = false;
-	int extentsWidth = 640;
-	int extentsHeight = 200;
-	int wrap = 1;
+	bool markup = false;
 
-	int64_t documentRevision = 0;
+	SourceMode mode = SourceMode::Text;
+	TextFeed::Config file;
+	TextFeed::Config variablesFile;
 
-	bool valid = false;
+	VariableMap variables;
+
+	// True when `text` had been changed from outside and the content was
+	// brought in line with it, so the caller can store the updated content.
+	bool contentAdjusted = false;
 };
-
-// The settings key holding the counter described above. The editor bumps it
-// through save(); nothing else should write it.
-extern const char *const kDocumentRevisionKey;
 
 void defaults(obs_data_t *data);
 
-obs_properties_t *properties(void *sourceData);
+obs_properties_t *properties(obs_source_t *source);
 
-// Reads the full document. Applies any flat property the user changed since
-// `snapshot` on top of it, then refreshes `snapshot`.
-void load(obs_data_t *data, Document &doc, SettingsSnapshot &snapshot);
+// Upgrades settings written by an older version in place. Safe to call on
+// settings that are already current.
+void migrate(obs_data_t *data);
 
-// Writes `doc` back, including refreshing the flat mirror properties so scripts
-// and the properties dialog see what the editor produced.
-void save(obs_data_t *data, const Document &doc);
+SourceConfig load(obs_data_t *data);
 
-// Serialises a document to and from a nested obs_data object, for the editor's
-// preset save/load.
-obs_data_t *documentToData(const Document &doc);
-void documentFromData(obs_data_t *data, Document &doc);
+// Writes `doc` back: base style, layout, motion, scroll, content and the plain
+// text mirror. In markup mode the text and its inline styling belong to the
+// `text` property, so only the base style and layout are written.
+void save(obs_data_t *data, const Document &doc, bool markup);
 
-// The per-source variable table, stored as an OBS editable list of "name=value"
-// strings.
-//
-// An editable list of plain strings is what makes the table reachable from
-// everything that already drives OBS sources: obs-websocket's SetInputSettings,
-// Streamer.bot, and a two-line Lua script can all write the array without
-// needing a Slugged-specific API, and the user can type into the same list by
-// hand in the properties dialog.
+// Writes just the per-character content and the plain text mirror.
+void saveContent(obs_data_t *data, const Document &doc);
+
+// Parses the stored content into `doc`'s blocks, or leaves `doc` with a single
+// empty paragraph when there is none.
+void contentFromData(obs_data_t *data, Document &doc);
+
+// The per-source variable table: an editable list of "name=value" strings, so
+// obs-websocket, Streamer.bot and a two-line script can all write it.
 extern const char *const kVariablesKey;
 
 VariableMap variablesFromData(obs_data_t *data, const char *key);
 void variablesToData(obs_data_t *data, const char *key, const VariableMap &values);
 
-// Parses a watched variables file, accepting either a JSON object of
-// name/value pairs or plain "name=value" lines. Bots write both.
+// A watched variables file: a JSON object of name/value pairs, or "name=value"
+// lines.
 VariableMap parseVariableFile(const std::string &text);
 
-// The process-wide variable table is persisted next to the module's own config
-// rather than in a scene collection, because it is shared by every source in
-// every collection -- putting it in one of them would make which collection was
-// open decide whether the others' text resolved.
+// The process-wide variable table lives next to the module's own config rather
+// than in a scene collection, because every collection shares it.
 void loadGlobalVariables();
 void saveGlobalVariables();
 

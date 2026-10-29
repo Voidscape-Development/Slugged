@@ -18,96 +18,93 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
-#include "../text/layout.hpp"
+#include "shape_cache.hpp"
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "slughorn/slughorn.hpp"
 
 namespace slugged {
 
-// Builds and owns the slughorn Atlas for a source.
+// One shape a source needs in its atlas, under a key that names it uniquely
+// (font instance, glyph, and which variant: fill, stroke width, colour layer).
+struct ShapeRequest {
+	std::string key;
+	const slughorn::Atlas::ShapeInfo *info = nullptr;
+};
+
+// The slughorn Atlas for one source.
 //
-// slughorn's Atlas is immutable once built: shapes go in with addShape(), then
-// build() packs them into the curve and band textures and the atlas is sealed.
-// So this class tracks which shapes the current text needs and rebuilds the
-// whole atlas whenever that set grows. That is cheaper than it sounds, because
-// the set is derived from the document's full text rather than from what is
-// currently visible -- a typewriter reveal or a scrolling ticker animates
-// through glyphs that were all registered up front, and never triggers a
-// rebuild mid-animation.
+// A slughorn Atlas is immutable once built, so this rebuilds it whenever the
+// set of shapes the text needs grows. Shapes that fall out of use are carried
+// along for a while, so deleting a character and retyping it does not rebuild,
+// but only while they are a minority: once the atlas holds more stale shapes
+// than live ones it is rebuilt from what is needed now. That bound is what keeps
+// dragging the outline-width slider, or a chat log scrolling through a lot of
+// different text, from growing the atlas forever.
 class AtlasCache {
 public:
-	AtlasCache();
-	~AtlasCache();
-
-	// Registers everything `glyphs` needs, rebuilding if the shape set grew.
-	// Returns true when a rebuild happened, meaning the GPU textures are stale
-	// and must be re-uploaded.
-	bool ensure(const std::vector<PositionedGlyph> &glyphs);
+	// Makes every requested shape available. Returns true when the atlas was
+	// rebuilt, meaning the GPU copy is stale.
+	bool ensure(const std::vector<ShapeRequest> &required);
 
 	const slughorn::Atlas *atlas() const { return _atlas.get(); }
 
-	// Bumped on every rebuild, so the renderer can tell whether its uploaded
-	// textures still match.
+	// The built atlas, shared so a finished frame can hand it to the graphics
+	// thread while the next rebuild starts a new one.
+	std::shared_ptr<const slughorn::Atlas> shared() const { return _atlas; }
+
+	std::optional<slughorn::Atlas::Shape> shape(const std::string &key) const;
+
+	// Bumped on every rebuild.
 	uint64_t generation() const { return _generation; }
 
-	// Atlas key for a glyph's filled outline. The face's slot becomes
-	// slughorn's 8-bit key mask and the glyph index the 21-bit value, so two
-	// faces contributing the same glyph index stay distinct.
-	static slughorn::Key fillKey(uint8_t slot, uint32_t glyphIndex);
-
-	// Atlas key for a stroked copy of a glyph at a given em-space width.
-	// Strokes are separate shapes, so they need their own namespace; a string
-	// key keeps them clearly apart from fills without eating mask bits.
-	static slughorn::Key outlineKey(uint8_t slot, uint32_t glyphIndex, float widthEm);
-
-	// Stroke widths are bucketed so that dragging the outline slider does not
-	// generate a distinct shape per pixel of travel.
-	static float bucketWidth(float widthEm);
+	size_t size() const { return _registered.size(); }
 
 private:
+	bool rebuild();
+
+	std::shared_ptr<const slughorn::Atlas> _atlas;
+	std::map<std::string, slughorn::Atlas::ShapeInfo> _registered;
+
+	uint64_t _generation = 0;
+};
+
+// Shelf-packed RGBA texture holding a source's colour bitmap glyphs.
+class ImageAtlas {
+public:
+	struct Slot {
+		float u0 = 0.0f;
+		float v0 = 0.0f;
+		float u1 = 0.0f;
+		float v1 = 0.0f;
+	};
+
 	struct Request {
-		uint8_t slot = 0;
-		uint32_t glyphIndex = 0;
-		FontFace *face = nullptr;
-
-		// 0 for a fill, otherwise the bucketed stroke width in em units.
-		float outlineWidthEm = 0.0f;
-
-		LineJoin join = LineJoin::Round;
-		LineCap cap = LineCap::Round;
-		float miterLimit = 4.0f;
-
-		bool operator==(const Request &o) const
-		{
-			return slot == o.slot && glyphIndex == o.glyphIndex && outlineWidthEm == o.outlineWidthEm;
-		}
+		std::string key;
+		const BitmapGlyph *bitmap = nullptr;
 	};
 
-	struct RequestHash {
-		size_t operator()(const Request &r) const
-		{
-			size_t h = std::hash<uint32_t>{}(r.glyphIndex);
+	// Returns true when the texture contents changed.
+	bool ensure(const std::vector<Request> &required);
 
-			h = h * 31 + std::hash<uint32_t>{}(r.slot);
-			h = h * 31 + std::hash<float>{}(r.outlineWidthEm);
+	std::optional<Slot> slot(const std::string &key) const;
 
-			return h;
-		}
-	};
+	std::shared_ptr<const std::vector<uint8_t>> pixels() const { return _pixels; }
+	uint32_t width() const { return _width; }
+	uint32_t height() const { return _height; }
+	uint64_t generation() const { return _generation; }
 
-	bool rebuild(const std::unordered_set<Request, RequestHash> &requests);
-	bool addFill(const Request &req);
-	bool addOutline(const Request &req);
-
-	std::unique_ptr<slughorn::Atlas> _atlas;
-	std::unordered_set<Request, RequestHash> _registered;
-
+private:
+	std::map<std::string, Slot> _slots;
+	std::shared_ptr<const std::vector<uint8_t>> _pixels;
+	uint32_t _width = 0;
+	uint32_t _height = 0;
 	uint64_t _generation = 0;
 };
 

@@ -18,31 +18,37 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
-#include "../core/document.hpp"
-
 #include <obs-module.h>
+
+#include <string>
+#include <vector>
 
 namespace slugged {
 namespace migrate {
 
-// Import from OBS's built-in text sources.
-//
-// Switching overlay to a new text source normally means rebuilding every text
-// element by hand. This reads an existing text_gdiplus or text_ft2_source and
-// reproduces its font, colour, outline, alignment, background, wrapping and
-// file/chatlog configuration as a Slugged document, so switching is one click.
+// Conversion from OBS's built-in text sources (GDI+ and FreeType 2).
 
-// True when `sourceId` is a text source Slugged knows how to import.
+// True when `sourceId` is a text source Slugged can convert.
 bool isLegacyTextSource(const char *sourceId);
 
-// Fills `list` with the names of every importable text source in the current
-// scene collection.
-void fillImportList(obs_property_t *list);
+// The names of every convertible text source in the current scene collection.
+std::vector<std::string> legacySourceNames();
 
-// Reads the named legacy source and writes the equivalent configuration into
-// `target`'s settings. Returns false when the source is missing or not a text
-// source.
-bool importInto(obs_data_t *targetSettings, const char *legacySourceName);
+// Writes the Slugged equivalent of `legacy`'s configuration into `target`:
+// font, colours (gradients included), outline, shadow, alignment, background,
+// size and wrapping, and file or chat-log reading.
+bool importSettings(obs_source_t *legacy, obs_data_t *target);
+
+struct ConvertOptions {
+	// Remove the original source once replaced; otherwise it is renamed with
+	// an " (old)" suffix and taken out of every scene.
+	bool deleteOriginal = false;
+};
+
+// Replaces `legacy` with a Slugged source of the same name in every scene and
+// group that uses it, keeping each item's position, transform, crop,
+// visibility, order and filters. Returns the new source, or nullptr.
+obs_source_t *convert(obs_source_t *legacy, const ConvertOptions &options);
 
 } // namespace migrate
 } // namespace slugged

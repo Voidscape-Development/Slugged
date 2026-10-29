@@ -21,35 +21,168 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <cstring>
 
+#include <graphics/vec2.h>
 #include <graphics/vec4.h>
 
 namespace slugged {
 
+// A GPU texture shared between the current and the outgoing frame when both
+// were built from the same atlas.
+struct Renderer::Texture {
+	gs_texture_t *texture = nullptr;
+	uint64_t generation = 0;
+	uint32_t width = 0;
+	uint32_t height = 0;
+
+	~Texture()
+	{
+		if (texture)
+			gs_texture_destroy(texture);
+	}
+};
+
+struct Renderer::Slot {
+	gs_vertbuffer_t *vertices = nullptr;
+	gs_indexbuffer_t *indices = nullptr;
+	uint32_t indexCount = 0;
+
+	gs_vertbuffer_t *backgroundVertices = nullptr;
+	gs_indexbuffer_t *backgroundIndices = nullptr;
+	uint32_t backgroundCount = 0;
+
+	std::shared_ptr<Texture> curve;
+	std::shared_ptr<Texture> band;
+	std::shared_ptr<Texture> image;
+
+	~Slot()
+	{
+		if (vertices)
+			gs_vertexbuffer_destroy(vertices);
+
+		if (indices)
+			gs_indexbuffer_destroy(indices);
+
+		if (backgroundVertices)
+			gs_vertexbuffer_destroy(backgroundVertices);
+
+		if (backgroundIndices)
+			gs_indexbuffer_destroy(backgroundIndices);
+	}
+};
+
 namespace {
 
-// Copies a float attribute array into a bmalloc'd block. libobs takes ownership
-// of everything hanging off gs_vb_data and frees it with bfree, so these cannot
-// be plain new[] or std::vector storage.
+// libobs takes ownership of everything hanging off gs_vb_data and frees it with
+// bfree, so attribute arrays must come from bmalloc.
 float *copyFloats(const std::vector<float> &src)
 {
 	if (src.empty())
 		return nullptr;
 
-	float *dst = static_cast<float *>(bmalloc(src.size() * sizeof(float)));
+	auto *dst = static_cast<float *>(bmalloc(src.size() * sizeof(float)));
 
 	std::memcpy(dst, src.data(), src.size() * sizeof(float));
 
 	return dst;
 }
 
+bool createBuffers(const GeometryBuffers &buffers, gs_vertbuffer_t *&vertices, gs_indexbuffer_t *&indices,
+		   uint32_t &count)
+{
+	if (buffers.empty())
+		return true;
+
+	const size_t vertexCount = buffers.vertexCount();
+
+	gs_vb_data *data = gs_vbdata_create();
+
+	data->num = vertexCount;
+
+	// Positions carry 4 floats per vertex precisely because vec3 is 16 bytes.
+	data->points = static_cast<vec3 *>(bmalloc(vertexCount * sizeof(vec3)));
+	std::memcpy(data->points, buffers.positions.data(), vertexCount * sizeof(vec3));
+
+	data->num_tex = GeometryBuffers::AttributeCount;
+	data->tvarray = static_cast<gs_tvertarray *>(bmalloc(data->num_tex * sizeof(gs_tvertarray)));
+
+	for (size_t i = 0; i < GeometryBuffers::AttributeCount; i++) {
+		data->tvarray[i].width = 4;
+		data->tvarray[i].array = copyFloats(buffers.attributes[i]);
+	}
+
+	vertices = gs_vertexbuffer_create(data, 0);
+
+	if (!vertices) {
+		slugged_log(LOG_ERROR, "failed to create a vertex buffer for %zu vertices", vertexCount);
+		return false;
+	}
+
+	auto *idx = static_cast<uint32_t *>(bmalloc(buffers.indices.size() * sizeof(uint32_t)));
+	std::memcpy(idx, buffers.indices.data(), buffers.indices.size() * sizeof(uint32_t));
+
+	indices = gs_indexbuffer_create(GS_UNSIGNED_LONG, idx, buffers.indices.size(), 0);
+
+	if (!indices) {
+		slugged_log(LOG_ERROR, "failed to create an index buffer");
+		return false;
+	}
+
+	count = uint32_t(buffers.indices.size());
+
+	return true;
+}
+
+// The libobs format with the same bytes per texel as a slughorn texture.
+gs_color_format textureFormat(slughorn::Atlas::TextureData::Format format)
+{
+	using Format = slughorn::Atlas::TextureData::Format;
+
+	switch (format) {
+	case Format::RGBA32F:
+		return GS_RGBA32F;
+	case Format::RGBA16F:
+		return GS_RGBA16F;
+	case Format::RG16UI:
+		return GS_RG16;
+	case Format::RGBA16UI:
+		return GS_RGBA16;
+	case Format::RGBA8:
+		return GS_RGBA;
+	case Format::R32F:
+		return GS_R32F;
+	case Format::RGB32F:
+		break;
+	}
+
+	return GS_UNKNOWN;
+}
+
+std::shared_ptr<Renderer::Texture> makeTexture(uint32_t width, uint32_t height, gs_color_format format,
+					       const uint8_t *bytes, uint64_t generation)
+{
+	if (format == GS_UNKNOWN)
+		return nullptr;
+
+	auto texture = std::make_shared<Renderer::Texture>();
+
+	texture->texture = gs_texture_create(width, height, format, 1, &bytes, 0);
+	texture->generation = generation;
+	texture->width = width;
+	texture->height = height;
+
+	if (!texture->texture)
+		return nullptr;
+
+	return texture;
+}
+
 } // namespace
+
+Renderer::Renderer() = default;
 
 Renderer::~Renderer()
 {
-	// Effects loaded through obs_module are owned by the module, but textures
-	// and buffers are ours. Callers destroy this inside a graphics context.
-	releaseGeometry();
-	releaseTextures();
+	release();
 }
 
 bool Renderer::loadEffect()
@@ -66,11 +199,11 @@ bool Renderer::loadEffect()
 
 	char *errors = nullptr;
 
+	// libobs caches effects by path, so every source shares one compile.
 	_effect = gs_effect_create_from_file(path, &errors);
 
-	if (!_effect) {
+	if (!_effect)
 		slugged_log(LOG_ERROR, "failed to compile slugged.effect: %s", errors ? errors : "unknown error");
-	}
 
 	bfree(path);
 	bfree(errors);
@@ -78,201 +211,175 @@ bool Renderer::loadEffect()
 	return _effect != nullptr;
 }
 
-void Renderer::releaseTextures()
+bool Renderer::upload(const FrameOutput &frame, bool keepPrevious)
 {
-	if (_curveTex) {
-		gs_texture_destroy(_curveTex);
-		_curveTex = nullptr;
+	auto slot = std::make_unique<Slot>();
+
+	// Reuse the current textures when the atlas has not changed since.
+	const Slot *previous = _current.get();
+
+	if (frame.atlas) {
+		if (previous && previous->curve && previous->curve->generation == frame.atlasGeneration) {
+			slot->curve = previous->curve;
+			slot->band = previous->band;
+		} else {
+			const auto &curve = frame.atlas->getCurveTextureData();
+			const auto &band = frame.atlas->getBandTextureData();
+
+			if (!curve.empty() && !band.empty()) {
+				slot->curve = makeTexture(curve.width, curve.height, textureFormat(curve.format),
+							  curve.bytes.data(), frame.atlasGeneration);
+
+				// The band texture holds unsigned integers, which libobs cannot
+				// sample as such; it goes up as UNORM16 with the same bytes and
+				// the shader multiplies by 65535 to recover them.
+				slot->band = makeTexture(band.width, band.height, textureFormat(band.format),
+							 band.bytes.data(), frame.atlasGeneration);
+
+				if (!slot->curve || !slot->band)
+					slugged_log(LOG_ERROR,
+						    "failed to create Slug data textures (%ux%u curve, %ux%u band)",
+						    curve.width, curve.height, band.width, band.height);
+			}
+		}
 	}
 
-	if (_bandTex) {
-		gs_texture_destroy(_bandTex);
-		_bandTex = nullptr;
+	if (frame.image && frame.imageWidth > 0 && frame.imageHeight > 0) {
+		if (previous && previous->image && previous->image->generation == frame.imageGeneration)
+			slot->image = previous->image;
+		else
+			slot->image = makeTexture(frame.imageWidth, frame.imageHeight, GS_RGBA, frame.image->data(),
+						  frame.imageGeneration);
 	}
 
-	_uploadedGeneration = UINT64_MAX;
-}
-
-void Renderer::releaseGeometry()
-{
-	if (_vertexBuffer) {
-		gs_vertexbuffer_destroy(_vertexBuffer);
-		_vertexBuffer = nullptr;
-	}
-
-	if (_indexBuffer) {
-		gs_indexbuffer_destroy(_indexBuffer);
-		_indexBuffer = nullptr;
-	}
-
-	_indexCount = 0;
-}
-
-bool Renderer::syncTextures(const AtlasCache &cache)
-{
-	if (cache.generation() == _uploadedGeneration)
-		return true;
-
-	releaseTextures();
-
-	const slughorn::Atlas *atlas = cache.atlas();
-
-	if (!atlas)
+	if (!createBuffers(frame.geometry, slot->vertices, slot->indices, slot->indexCount) ||
+	    !createBuffers(frame.background, slot->backgroundVertices, slot->backgroundIndices, slot->backgroundCount))
 		return false;
 
-	const slughorn::Atlas::TextureData &curve = atlas->getCurveTextureData();
-	const slughorn::Atlas::TextureData &band = atlas->getBandTextureData();
+	if (keepPrevious && _current && _current->indexCount > 0)
+		_outgoing = std::move(_current);
 
-	if (curve.empty() || band.empty())
-		return false;
-
-	{
-		const uint8_t *data = curve.bytes.data();
-
-		_curveTex = gs_texture_create(curve.width, curve.height, GS_RGBA32F, 1, &data, 0);
-		_curveWidth = curve.width;
-		_curveHeight = curve.height;
-	}
-
-	{
-		// slughorn hands this over as RGBA16UI. libobs has no UINT format at
-		// all, so it is uploaded as GS_RGBA16 (UNORM) -- the bytes are
-		// identical, only the interpretation differs, and the shader multiplies
-		// by 65535 to recover the original integers exactly.
-		const uint8_t *data = band.bytes.data();
-
-		_bandTex = gs_texture_create(band.width, band.height, GS_RGBA16, 1, &data, 0);
-		_bandWidth = band.width;
-		_bandHeight = band.height;
-	}
-
-	if (!_curveTex || !_bandTex) {
-		slugged_log(LOG_ERROR, "failed to create Slug data textures (%ux%u curve, %ux%u band)", curve.width,
-			    curve.height, band.width, band.height);
-
-		releaseTextures();
-
-		return false;
-	}
-
-	_uploadedGeneration = cache.generation();
+	_current = std::move(slot);
 
 	return true;
 }
 
-bool Renderer::setGeometry(const GeometryBuffers &buffers)
+bool Renderer::hasGeometry() const
 {
-	releaseGeometry();
-
-	if (buffers.empty())
-		return false;
-
-	const size_t vertices = buffers.vertexCount();
-
-	// gs_vb_data and everything it points at must come from bmalloc; libobs
-	// frees the whole graph itself when the buffer is destroyed.
-	gs_vb_data *data = gs_vbdata_create();
-
-	data->num = vertices;
-	data->points = static_cast<vec3 *>(bmalloc(vertices * sizeof(vec3)));
-
-	// positions carries 4 floats per vertex precisely because vec3 is 16 bytes
-	// wide, so this is a straight copy rather than a strided one.
-	std::memcpy(data->points, buffers.positions.data(), vertices * sizeof(vec3));
-
-	data->num_tex = 7;
-	data->tvarray = static_cast<gs_tvertarray *>(bmalloc(data->num_tex * sizeof(gs_tvertarray)));
-
-	const std::vector<float> *sources[7] = {
-		&buffers.em, &buffers.bandXform, &buffers.shapeData, &buffers.color,
-		&buffers.fx, &buffers.pivot,     &buffers.motion,
-	};
-
-	for (size_t i = 0; i < 7; i++) {
-		data->tvarray[i].width = 4;
-		data->tvarray[i].array = copyFloats(*sources[i]);
-	}
-
-	_vertexBuffer = gs_vertexbuffer_create(data, 0);
-
-	if (!_vertexBuffer) {
-		slugged_log(LOG_ERROR, "failed to create vertex buffer for %zu vertices", vertices);
-		return false;
-	}
-
-	uint32_t *indices = static_cast<uint32_t *>(bmalloc(buffers.indices.size() * sizeof(uint32_t)));
-
-	std::memcpy(indices, buffers.indices.data(), buffers.indices.size() * sizeof(uint32_t));
-
-	_indexBuffer = gs_indexbuffer_create(GS_UNSIGNED_LONG, indices, buffers.indices.size(), 0);
-
-	if (!_indexBuffer) {
-		slugged_log(LOG_ERROR, "failed to create index buffer");
-		releaseGeometry();
-
-		return false;
-	}
-
-	_indexCount = buffers.indices.size();
-
-	return true;
+	return _current && _current->indexCount > 0;
 }
 
-void Renderer::draw(float elapsed, float opacity)
+bool Renderer::hasOutgoing() const
 {
-	if (!_effect || !_vertexBuffer || !_indexBuffer || !_curveTex || !_bandTex)
+	return _outgoing && _outgoing->indexCount > 0;
+}
+
+void Renderer::releaseOutgoing()
+{
+	_outgoing.reset();
+}
+
+void Renderer::release()
+{
+	_current.reset();
+	_outgoing.reset();
+}
+
+void Renderer::drawBackground(const DrawParams &params)
+{
+	if (_current && _current->backgroundCount > 0)
+		drawSlot(*_current, true, params);
+}
+
+void Renderer::draw(const DrawParams &params)
+{
+	if (_current && _current->indexCount > 0)
+		drawSlot(*_current, false, params);
+}
+
+void Renderer::drawOutgoing(const DrawParams &params)
+{
+	if (_outgoing && _outgoing->indexCount > 0)
+		drawSlot(*_outgoing, false, params);
+}
+
+void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &params)
+{
+	if (!_effect)
 		return;
 
-	gs_eparam_t *curveParam = gs_effect_get_param_by_name(_effect, "curve_tex");
-	gs_eparam_t *bandParam = gs_effect_get_param_by_name(_effect, "band_tex");
-	gs_eparam_t *curveTexel = gs_effect_get_param_by_name(_effect, "curve_texel");
-	gs_eparam_t *bandTexel = gs_effect_get_param_by_name(_effect, "band_texel");
-	gs_eparam_t *bandWidth = gs_effect_get_param_by_name(_effect, "band_width");
-	gs_eparam_t *elapsedParam = gs_effect_get_param_by_name(_effect, "elapsed");
-	gs_eparam_t *opacityParam = gs_effect_get_param_by_name(_effect, "opacity");
+	gs_vertbuffer_t *vertices = background ? slot.backgroundVertices : slot.vertices;
+	gs_indexbuffer_t *indices = background ? slot.backgroundIndices : slot.indices;
+	const uint32_t count = background ? slot.backgroundCount : slot.indexCount;
 
-	gs_effect_set_texture(curveParam, _curveTex);
-	gs_effect_set_texture(bandParam, _bandTex);
+	if (!vertices || !indices || !count)
+		return;
 
-	vec2 curveTexelSize;
-	vec2 bandTexelSize;
+	// Glyph quads need the atlas; the background does not.
+	if (!background && (!slot.curve || !slot.band) && !slot.image)
+		return;
 
-	vec2_set(&curveTexelSize, _curveWidth ? 1.0f / float(_curveWidth) : 0.0f,
-		 _curveHeight ? 1.0f / float(_curveHeight) : 0.0f);
-	vec2_set(&bandTexelSize, _bandWidth ? 1.0f / float(_bandWidth) : 0.0f,
-		 _bandHeight ? 1.0f / float(_bandHeight) : 0.0f);
+	auto param = [this](const char *name) {
+		return gs_effect_get_param_by_name(_effect, name);
+	};
 
-	gs_effect_set_vec2(curveTexel, &curveTexelSize);
-	gs_effect_set_vec2(bandTexel, &bandTexelSize);
-	gs_effect_set_float(bandWidth, float(_bandWidth));
-	gs_effect_set_float(elapsedParam, elapsed);
-	gs_effect_set_float(opacityParam, opacity);
+	gs_effect_set_texture(param("curve_tex"), slot.curve ? slot.curve->texture : nullptr);
+	gs_effect_set_texture(param("band_tex"), slot.band ? slot.band->texture : nullptr);
+	gs_effect_set_texture(param("image_tex"), slot.image ? slot.image->texture : nullptr);
+
+	vec2 curveTexel;
+	vec2 bandTexel;
+
+	vec2_set(&curveTexel, slot.curve ? 1.0f / float(slot.curve->width) : 0.0f,
+		 slot.curve ? 1.0f / float(slot.curve->height) : 0.0f);
+	vec2_set(&bandTexel, slot.band ? 1.0f / float(slot.band->width) : 0.0f,
+		 slot.band ? 1.0f / float(slot.band->height) : 0.0f);
+
+	gs_effect_set_vec2(param("curve_texel"), &curveTexel);
+	gs_effect_set_vec2(param("band_texel"), &bandTexel);
+	gs_effect_set_float(param("band_width"), slot.band ? float(slot.band->width) : 1.0f);
+	gs_effect_set_float(param("curve_width"), slot.curve ? float(slot.curve->width) : 1.0f);
+
+	gs_effect_set_float(param("elapsed"), params.elapsed);
+	gs_effect_set_float(param("opacity"), params.opacity);
+	gs_effect_set_float(param("scope_changed"), params.scopeChanged ? 1.0f : 0.0f);
+	gs_effect_set_float(param("reverse"), params.reverse ? 1.0f : 0.0f);
+
+	vec2 offset;
+	vec2_set(&offset, background ? 0.0f : params.offsetX, background ? 0.0f : params.offsetY);
+	gs_effect_set_vec2(param("scroll_offset"), &offset);
+
+	vec4 clip;
+
+	if (params.clip)
+		vec4_set(&clip, 0.0f, 0.0f, params.clipWidth, params.clipHeight);
+	else
+		vec4_set(&clip, -1e9f, -1e9f, 1e9f, 1e9f);
+
+	gs_effect_set_vec4(param("clip_rect"), &clip);
 
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
-	// Straight-alpha source over destination, with the destination's alpha
-	// accumulated so the source composites correctly when it is itself drawn
-	// into a texture (which is what happens as soon as a filter is attached).
+	// Straight-alpha source over destination, accumulating destination alpha
+	// so the result composites correctly when drawn into a texture (as it is
+	// once a filter is attached).
 	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-
 	gs_enable_depth_test(false);
 
-	// Glyph quads are mirrored vertically to convert Slug's y-up em space into
-	// OBS's y-down source space, which reverses their winding order.
+	// Glyph quads are mirrored vertically to turn y-up em space into OBS's
+	// y-down source space, which reverses their winding.
 	const gs_cull_mode previousCull = gs_get_cull_mode();
 	gs_set_cull_mode(GS_NEITHER);
 
-	gs_technique_t *tech = gs_effect_get_technique(_effect, "Draw");
-
-	if (tech) {
+	if (gs_technique_t *tech = gs_effect_get_technique(_effect, "Draw")) {
 		gs_technique_begin(tech);
 		gs_technique_begin_pass(tech, 0);
 
-		gs_load_vertexbuffer(_vertexBuffer);
-		gs_load_indexbuffer(_indexBuffer);
+		gs_load_vertexbuffer(vertices);
+		gs_load_indexbuffer(indices);
 
-		gs_draw(GS_TRIS, 0, uint32_t(_indexCount));
+		gs_draw(GS_TRIS, 0, count);
 
 		gs_technique_end_pass(tech);
 		gs_technique_end(tech);
@@ -282,33 +389,6 @@ void Renderer::draw(float elapsed, float opacity)
 	gs_load_vertexbuffer(nullptr);
 
 	gs_set_cull_mode(previousCull);
-	gs_blend_state_pop();
-}
-
-void Renderer::drawBackground(uint32_t width, uint32_t height, const Rgba &color)
-{
-	if (!width || !height || color.a <= 0.0f)
-		return;
-
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-
-	if (!solid)
-		return;
-
-	gs_eparam_t *colorParam = gs_effect_get_param_by_name(solid, "color");
-
-	vec4 rgba;
-	vec4_set(&rgba, color.r, color.g, color.b, color.a);
-
-	gs_effect_set_vec4(colorParam, &rgba);
-
-	gs_blend_state_push();
-	gs_reset_blend_state();
-	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-
-	while (gs_effect_loop(solid, "Solid"))
-		gs_draw_sprite(nullptr, 0, width, height);
-
 	gs_blend_state_pop();
 }
 

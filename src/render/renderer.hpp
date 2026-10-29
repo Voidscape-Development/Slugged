@@ -18,67 +18,74 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
-#include "atlas_cache.hpp"
-#include "geometry.hpp"
+#include "frame.hpp"
 
 #include <cstdint>
+#include <memory>
 
 #include <obs-module.h>
 
 namespace slugged {
 
-// Owns every GPU object for one source and issues the draw.
+// Owns the GPU objects for one source and issues its draws.
 //
-// Every method here must be called inside an obs_enter_graphics() /
-// obs_leave_graphics() pair, or from a render callback where OBS already holds
-// the graphics context.
+// Every method must be called with a graphics context current: inside a render
+// callback, or between obs_enter_graphics() and obs_leave_graphics().
+//
+// It holds two uploaded frames: the current one, and optionally the one before
+// it, so old text can animate out while new text waits to animate in.
 class Renderer {
 public:
-	Renderer() = default;
+	struct DrawParams {
+		float elapsed = 0.0f;
+		float opacity = 1.0f;
+
+		// Only characters marked as changed animate.
+		bool scopeChanged = false;
+
+		// Play the motion backwards.
+		bool reverse = false;
+
+		float offsetX = 0.0f;
+		float offsetY = 0.0f;
+
+		bool clip = false;
+		float clipWidth = 0.0f;
+		float clipHeight = 0.0f;
+	};
+
+	Renderer();
 	~Renderer();
 
 	Renderer(const Renderer &) = delete;
 	Renderer &operator=(const Renderer &) = delete;
 
-	// Loads the shared effect. Safe to call repeatedly.
 	bool loadEffect();
 
-	// Uploads the atlas's curve and band textures if `cache` has been rebuilt
-	// since the last upload.
-	bool syncTextures(const AtlasCache &cache);
+	// Uploads a frame. With `keepPrevious`, the frame being replaced stays
+	// available to drawOutgoing() until releaseOutgoing().
+	bool upload(const FrameOutput &frame, bool keepPrevious);
 
-	// Replaces the vertex and index buffers.
-	bool setGeometry(const GeometryBuffers &buffers);
+	void drawBackground(const DrawParams &params);
+	void draw(const DrawParams &params);
+	void drawOutgoing(const DrawParams &params);
 
-	// Draws the current geometry. `elapsed` drives shader-side animation.
-	void draw(float elapsed, float opacity);
+	bool hasGeometry() const;
+	bool hasOutgoing() const;
 
-	// Draws a plain filled rectangle, used for the document background.
-	static void drawBackground(uint32_t width, uint32_t height, const Rgba &color);
+	void releaseOutgoing();
+	void release();
 
-	void releaseGeometry();
-	void releaseTextures();
-
-	bool hasGeometry() const { return _indexCount > 0; }
+	struct Texture;
+	struct Slot;
 
 private:
+	void drawSlot(const Slot &slot, bool background, const DrawParams &params);
+
 	gs_effect_t *_effect = nullptr;
 
-	gs_texture_t *_curveTex = nullptr;
-	gs_texture_t *_bandTex = nullptr;
-
-	gs_vertbuffer_t *_vertexBuffer = nullptr;
-	gs_indexbuffer_t *_indexBuffer = nullptr;
-
-	size_t _indexCount = 0;
-
-	uint32_t _curveWidth = 0;
-	uint32_t _curveHeight = 0;
-	uint32_t _bandWidth = 0;
-	uint32_t _bandHeight = 0;
-
-	// Atlas generation currently resident on the GPU.
-	uint64_t _uploadedGeneration = UINT64_MAX;
+	std::unique_ptr<Slot> _current;
+	std::unique_ptr<Slot> _outgoing;
 };
 
 } // namespace slugged

@@ -47,15 +47,13 @@ namespace host {
 // timers to 0:00, the scene names to nothing, the output stats to zero -- since
 // nothing is there to report otherwise.
 
-// Registers the frontend hooks. Called once from the module's load.
+// Registers the frontend hooks and the sampling tick. Called once from the
+// module's load. The values are sampled a few times a second, once for the
+// whole process.
 void startup();
 
 // Releases them. Called once from the module's unload.
 void shutdown();
-
-// Advances the sampling timer. Safe to call from every source every frame; the
-// work behind it happens a few times a second.
-void tick(float seconds);
 
 // The current values. Cheap: a copy of an already-built table.
 VariableMap values();
