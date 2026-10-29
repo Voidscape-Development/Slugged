@@ -29,12 +29,12 @@ void TokenContext::set(const std::string &name, const std::string &value)
 	const std::string key = normaliseVariableName(name);
 
 	if (!key.empty())
-		_source[key] = value;
+		_runtime[key] = value;
 }
 
 void TokenContext::erase(const std::string &name)
 {
-	_source.erase(normaliseVariableName(name));
+	_runtime.erase(normaliseVariableName(name));
 }
 
 bool TokenContext::setSourceVariables(const VariableMap &values)
@@ -103,7 +103,8 @@ double parseDuration(const std::string &text)
 
 	while (start <= text.size()) {
 		const size_t colon = text.find(':', start);
-		const std::string part = text.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+		const std::string part =
+			text.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
 
 		if (part.empty() || part.find_first_not_of("0123456789.") != std::string::npos)
 			return -1.0;
@@ -273,7 +274,7 @@ TokenContext::Origin TokenContext::lookup(const std::string &name, const std::st
 	// A variable is matched on the whole token text, argument included.
 	const std::string full = arg.empty() ? name : name + ":" + arg;
 
-	for (const VariableMap *table : {&_source, &_file}) {
+	for (const VariableMap *table : {&_runtime, &_source, &_file}) {
 		const auto it = table->find(full);
 
 		if (it != table->end()) {

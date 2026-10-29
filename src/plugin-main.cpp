@@ -21,6 +21,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "obs/host_tokens.hpp"
 #include "obs/settings.hpp"
 #include "obs/slugged_source.hpp"
+#include "render/rebuild_worker.hpp"
+#include "render/shape_cache.hpp"
 #include "text/font_manager.hpp"
 #include "util/log.hpp"
 
@@ -120,6 +122,12 @@ bool obs_module_load(void)
 	return true;
 }
 
+void obs_module_post_load(void)
+{
+	// The Tools menu exists once the frontend is up.
+	slugged::editor::registerTools();
+}
+
 void obs_module_unload(void)
 {
 	slugged::editor::shutdown();
@@ -127,8 +135,10 @@ void obs_module_unload(void)
 	slugged::settings::saveGlobalVariables();
 	slugged::host::shutdown();
 
-	// Faces hold FreeType and HarfBuzz objects; drop them before the module's
-	// copies of those libraries go away.
+	// The worker uses fonts and shapes; stop it before they go away, and drop
+	// the faces before the module's copies of FreeType and HarfBuzz do.
+	slugged::RebuildWorker::instance().stop();
+	slugged::ShapeCache::instance().clear();
 	slugged::FontManager::instance().reset();
 
 	slugged::setLogSink(nullptr);

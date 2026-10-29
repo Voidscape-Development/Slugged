@@ -33,13 +33,14 @@ namespace slugged {
 //
 // Values are resolved in this order, and the first table holding the name wins:
 //
-//   1. variables set on the source itself (properties list, editor, proc)
-//   2. variables read from the source's watched variables file
-//   3. the process-wide table shared by every Slugged source
-//   4. host values supplied by the OBS layer ({scene}, {fps}, {stream_time}...)
-//   5. the clock, calendar and timer built-ins resolved here
+//   1. values a script set on the source at runtime (its set_variable proc)
+//   2. variables set on the source itself (properties list, editor)
+//   3. variables read from the source's watched variables file
+//   4. the process-wide table shared by every Slugged source
+//   5. host values supplied by the OBS layer ({scene}, {fps}, {stream_time}...)
+//   6. the clock, calendar and timer built-ins resolved here
 //
-// The first three are *content*: a value changing there is a real change to
+// The first four are *content*: a value changing there is a real change to
 // what the text says, and replays a text-change animation. The last two are
 // *live*: they tick over on their own, and a clock advancing is not a reason to
 // replay an intro.
@@ -48,8 +49,11 @@ namespace slugged {
 // so no input can produce an infinite loop.
 class TokenContext {
 public:
+	// The runtime table: what a script pushes in. It is not saved, and it does
+	// not fight the settings list, which a settings update replaces wholesale.
 	void set(const std::string &name, const std::string &value);
 	void erase(const std::string &name);
+	void clearRuntime() { _runtime.clear(); }
 
 	// Replace a whole table. Returns true when the contents changed.
 	bool setSourceVariables(const VariableMap &values);
@@ -85,6 +89,7 @@ private:
 	bool builtin(const std::string &name, const std::string &arg, std::string &out) const;
 	std::string expandImpl(const std::string &text, bool liveToo) const;
 
+	VariableMap _runtime;
 	VariableMap _source;
 	VariableMap _file;
 	VariableMap _host;

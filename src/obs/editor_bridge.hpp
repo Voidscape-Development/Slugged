@@ -25,7 +25,7 @@ namespace editor {
 
 // Seam between the source and the Qt editor.
 //
-// Everything Qt lives behind these three functions so the source, the settings
+// Everything Qt lives behind these functions so the source, the settings
 // bridge and the renderer never include a Qt header. When the plugin is built
 // without Qt these become no-ops and the source still works fully from the
 // standard properties dialog.
@@ -36,6 +36,9 @@ void openFor(obs_source_t *source);
 // Closes any editor window bound to `source`. Called when the source is being
 // destroyed, so the window cannot outlive what it is editing.
 void closeFor(obs_source_t *source);
+
+// Adds Slugged's entries to OBS's Tools menu (converting text sources).
+void registerTools();
 
 // Tears down all editor state at module unload.
 void shutdown();

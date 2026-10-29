@@ -50,6 +50,16 @@ PreviewWidget::~PreviewWidget()
 	destroyDisplay();
 }
 
+void PreviewWidget::detach()
+{
+	// The display's own lock makes removing the callback safe from any
+	// thread; once it returns, no draw can be touching the source.
+	if (_display)
+		obs_display_remove_draw_callback(_display, drawCallback, this);
+
+	_source = nullptr;
+}
+
 void PreviewWidget::setZoom(float zoom)
 {
 	_zoom = std::max(0.05f, zoom);
@@ -151,8 +161,17 @@ void PreviewWidget::drawCallback(void *data, uint32_t cx, uint32_t cy)
 	if (!self || !self->_source)
 		return;
 
-	const uint32_t sourceWidth = std::max(1u, obs_source_get_width(self->_source));
-	const uint32_t sourceHeight = std::max(1u, obs_source_get_height(self->_source));
+	// An overlay filter has no size or picture of its own; show it the way
+	// the scene does, drawn over the source it sits on.
+	obs_source_t *shown = self->_source;
+
+	if (obs_source_get_type(shown) == OBS_SOURCE_TYPE_FILTER) {
+		if (obs_source_t *parent = obs_filter_get_parent(shown))
+			shown = parent;
+	}
+
+	const uint32_t sourceWidth = std::max(1u, obs_source_get_width(shown));
+	const uint32_t sourceHeight = std::max(1u, obs_source_get_height(shown));
 
 	// Fit the source inside the widget, then apply the user's zoom on top.
 	const float fit = std::min(float(cx) / float(sourceWidth), float(cy) / float(sourceHeight));
@@ -187,7 +206,7 @@ void PreviewWidget::drawCallback(void *data, uint32_t cx, uint32_t cy)
 		}
 	}
 
-	obs_source_video_render(self->_source);
+	obs_source_video_render(shown);
 
 	gs_viewport_pop();
 	gs_projection_pop();

@@ -51,7 +51,8 @@ struct Register {
 	Register(const char *name, std::function<void()> fn) { registry().push_back({name, std::move(fn)}); }
 };
 
-template<typename A, typename B> void checkEqual(const A &a, const B &b, const char *ea, const char *eb, const char *file, int line)
+template<typename A, typename B>
+void checkEqual(const A &a, const B &b, const char *ea, const char *eb, const char *file, int line)
 {
 	if (a == b)
 		return;

@@ -360,8 +360,9 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 					return;
 
 				const float size = span.style->sizePx;
-				const float thickness = std::max(
-					1.0f, (strike ? span.file->strikeoutThickness : span.file->underlineThickness) * size);
+				const float thickness = std::max(1.0f, (strike ? span.file->strikeoutThickness
+									       : span.file->underlineThickness) *
+									       size);
 
 				// Both metrics are y-up about the baseline. FreeType gives the
 				// underline's centre but OS/2 gives the strikeout's top edge.

@@ -379,8 +379,7 @@ struct ParagraphOverride {
 #undef SLUGGED_X
 	}
 
-	void clear(const ParagraphOverride &mask)
-	{
+	void clear(const ParagraphOverride &mask){
 #define SLUGGED_X(name, type, member, key) \
 	if (mask.name)                     \
 		name.reset();
@@ -447,8 +446,7 @@ enum class MotionTrigger {
 	Loop,
 };
 SLUGGED_ENUM_TRAITS(MotionTrigger, {MotionTrigger::Never, "never"}, {MotionTrigger::TextChange, "text"},
-		    {MotionTrigger::Show, "show"}, {MotionTrigger::Activate, "activate"},
-		    {MotionTrigger::Loop, "loop"})
+		    {MotionTrigger::Show, "show"}, {MotionTrigger::Activate, "activate"}, {MotionTrigger::Loop, "loop"})
 
 // Which characters a text-change replay animates.
 enum class MotionScope {

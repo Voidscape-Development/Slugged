@@ -20,11 +20,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "core/document.hpp"
 #include "render/frame.hpp"
+#include "render/rebuild_worker.hpp"
 #include "text/font_enum.hpp"
 #include "text/font_manager.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 
 using namespace slugged;
 
@@ -239,4 +242,32 @@ TEST(frame_colour_emoji_renders_as_colour)
 
 	if (images > 0)
 		CHECK(frame.image != nullptr && frame.imageWidth > 0);
+}
+
+TEST(worker_builds_only_the_newest_input)
+{
+	if (!haveFonts())
+		return;
+
+	auto job = std::make_shared<RebuildWorker::Job>();
+
+	for (uint64_t id = 1; id <= 5; id++) {
+		FrameInput input;
+		input.document = docWith("frame " + std::to_string(id));
+
+		RebuildWorker::instance().submit(job, std::move(input), id);
+	}
+
+	uint64_t readyId = 0;
+
+	for (int i = 0; i < 400 && readyId != 5; i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+		std::lock_guard<std::mutex> lock(job->mutex);
+		readyId = job->readyId;
+	}
+
+	CHECK_EQ(readyId, uint64_t(5));
+
+	RebuildWorker::instance().stop();
 }

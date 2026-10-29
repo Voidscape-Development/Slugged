@@ -60,11 +60,16 @@ add_executable(
   "${SLUGGED_ROOT}/src/render/atlas_cache.cpp"
   "${SLUGGED_ROOT}/src/render/frame.cpp"
   "${SLUGGED_ROOT}/src/render/geometry.cpp"
+  "${SLUGGED_ROOT}/src/render/rebuild_worker.cpp"
   "${SLUGGED_ROOT}/src/render/shape_cache.cpp"
 )
 
 target_include_directories(slugged-tests PRIVATE "${SLUGGED_ROOT}/src" "${SLUGGED_DEPS_DIR}/sheenbidi/Headers")
-target_link_libraries(slugged-tests PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype PkgConfig::FONTCONFIG)
+find_package(Threads REQUIRED)
+target_link_libraries(
+  slugged-tests
+  PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype PkgConfig::FONTCONFIG Threads::Threads
+)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(slugged-tests PRIVATE -Wall -Wextra)

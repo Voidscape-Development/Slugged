@@ -25,7 +25,8 @@ namespace {
 
 bool isSpace(uint32_t cp)
 {
-	return cp == ' ' || cp == '\t' || cp == 0x3000 || (cp >= 0x2000 && cp <= 0x2006) || (cp >= 0x2008 && cp <= 0x200A);
+	return cp == ' ' || cp == '\t' || cp == 0x3000 || (cp >= 0x2000 && cp <= 0x2006) ||
+	       (cp >= 0x2008 && cp <= 0x200A);
 }
 
 bool isDash(uint32_t cp)

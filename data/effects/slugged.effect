@@ -2,72 +2,93 @@
  * slugged.effect -- Slug GPU vector coverage solve, ported to OBS's effect dialect.
  *
  * This is a port of the Slug algorithm (Lengyel 2017) as implemented by
- * slughorn's reference GLSL frontend (example/slughorn-example-glfw.cpp).
- * Three things force it to differ from that reference, all of them properties
- * of libobs's graphics abstraction rather than of Slug:
+ * slughorn's reference GLSL frontend. Three things force it to differ from that
+ * reference, all of them properties of libobs's graphics abstraction:
  *
- * 1. No integer texture formats. libobs's gs_color_format enum has no UINT
- *    variant, so slughorn's RGBA16UI band texture is uploaded as GS_RGBA16
- *    (UNORM) instead. A UNORM16 fetch returns v/65535, so every band read is
- *    multiplied back by 65535 and rounded. fp32 represents integers exactly
- *    below 2^24, so the round-trip is lossless for the full 16-bit range.
+ * 1. No integer texture formats. slughorn's RGBA16UI band texture is uploaded as
+ *    GS_RGBA16 (UNORM) instead. A UNORM16 fetch returns v/65535, so every band
+ *    read is multiplied back by 65535 and rounded; fp32 represents every 16-bit
+ *    integer exactly, so the round trip is lossless.
  *
- * 2. No texelFetch. OBS's effect parser exposes Sample/SampleLevel, not Load.
- *    Fetches go through a point-clamp sampler at texel centres instead. Every
- *    fetch uses SampleLevel (never Sample) because these run inside divergent
- *    loops, where implicit-gradient sampling is undefined in HLSL.
+ * 2. No texelFetch. Fetches go through a point-clamp sampler at texel centres,
+ *    always with SampleLevel, because they run inside data-dependent loops.
  *
- * 3. No float bit-casts. The reference derives its root classification code
- *    from raw float sign bits (floatBitsToUint(y) >> 31) and a 0x2E74 shift
- *    table. asuint() is not reliably available here, so the same table is
- *    reduced to boolean logic over three y < 0 comparisons -- see
- *    slug_RootFlags() for the derivation. The only behavioural difference is
- *    at exactly -0.0, which the bit trick classifies as negative and a
- *    comparison does not; that case is a degenerate tie on the curve boundary
- *    either way.
+ * 3. No float bit-casts. The reference classifies roots from raw float sign
+ *    bits and a 0x2E74 lookup table; here the same table is reduced to boolean
+ *    logic over three comparisons (see slug_RootFlags). The only difference is
+ *    at exactly -0.0, a degenerate tie on the curve boundary either way.
  *
- * Vertex attribute mapping (see render/geometry.cpp, which fills gs_vb_data):
+ * Every screen-space derivative is taken once, at the top of the pixel shader,
+ * outside all flow control: derivatives inside a branch are undefined in HLSL,
+ * and several of the paths below evaluate the coverage solve conditionally.
  *
- *   POSITION   points     .xyz glyph quad corner, source-space pixels; .w is
- *                         part of libobs's 16-byte vertex stride and is forced
- *                         to 1 in the vertex shader before the ViewProj
- *                         transform (see VSSlug)
- *   TEXCOORD0  tvarray[0] .xy em-space coord, .z solid flag, .w unused
- *                         A solid flag of 1 marks a quad that carries no glyph
- *                         shape -- an underline or strikeout bar -- so the
- *                         pixel shader fills it instead of solving coverage.
- *   TEXCOORD1  tvarray[1] band transform (bandScaleX/Y, bandOffsetX/Y)
- *   TEXCOORD2  tvarray[2] shape data (bandTexX/Y, bandMaxX/Y)
- *   TEXCOORD3  tvarray[3] fill colour, straight alpha
- *   TEXCOORD4  tvarray[4] motion (mode, param, startTime, duration)
- *   TEXCOORD5  tvarray[5] .xy pivot for the presets that scale or rotate about
- *                         the glyph's own centre; .z this quad's position in
- *                         whichever unit the stagger counts in (character, word
- *                         or line), which is what spreads a continuous preset
- *                         along the text; .w unused
- *   TEXCOORD6  tvarray[6] .xy unit vector a displacing preset travels along,
- *                         .z radians per second for a continuous one, .w unused
+ * Vertex attributes (render/geometry.hpp fills these):
+ *
+ *   POSITION   .xy source-space corner; .w forced to 1 in the vertex shader
+ *   TEXCOORD0  em.xy, code, knock-out alpha of shape A
+ *              em is the glyph-space coordinate for glyph quads, the texture
+ *              coordinate for bitmaps, and the pixel offset from the centre for
+ *              the background. code = kind + 8 * gradient type.
+ *   TEXCOORD1  shape A band transform      (the fill)
+ *   TEXCOORD2  shape A band location/limits
+ *   TEXCOORD3  shape B band transform      (the outline ring; zero when absent)
+ *   TEXCOORD4  shape B band location/limits
+ *              For the background, TEXCOORD1 carries (half width, half height,
+ *              corner radius, unused) instead.
+ *   TEXCOORD5  colour, straight alpha (gradient start)
+ *   TEXCOORD6  gradient end colour
+ *   TEXCOORD7  motion: preset, amount, start time (whole text), duration
+ *   TEXCOORD8  pivot.xy, stagger index, start time (changed text only; < 0 for
+ *              a character that did not change)
+ *   TEXCOORD9  direction.xy, radians per second, knock-out alpha of shape B
+ *   TEXCOORD10 gradient u, v; em offset from a shadow to the glyph casting it
+ *
+ * Quad kinds:
+ *
+ *   FILL       coverage of A
+ *   OUTLINE    coverage of B, minus A in front of it
+ *   SHADOW     coverage of A or B, minus A or B where the glyph itself sits
+ *   SOLID      a filled rectangle (underline, strikeout)
+ *   IMAGE      a colour bitmap glyph
+ *   IMAGE_TINT a colour bitmap's silhouette in a flat colour (its shadow)
+ *   ROUNDRECT  the background
+ *
+ * The knock-outs are what make translucency correct without an offscreen
+ * pass: a letter at 50% opacity mid-fade must not show its own outline or
+ * shadow through itself, and neither may the next letter's outline paint over
+ * this one's fill.
  */
 
 uniform float4x4 ViewProj;
 
 uniform texture2d curve_tex;
 uniform texture2d band_tex;
+uniform texture2d image_tex;
 
-/* 1/width, 1/height for each data texture, so texel centres are (i + 0.5) * size. */
+/* 1/width, 1/height for each data texture. */
 uniform float2 curve_texel;
 uniform float2 band_texel;
 
-/* Width of the band texture in texels. Band curve lists are addressed as a flat
- * run that wraps at the texture width, so the shader needs the real width to
- * unwrap it (the reference hardcoded log2(512) and shifted). */
+/* Width of the band texture in texels, to unwrap curve lists that wrap rows. */
 uniform float band_width;
 
-/* Seconds since the source started, for shader-side motion. */
+/* Seconds on the animation clock. */
 uniform float elapsed;
 
-/* Global multiplier applied to the final alpha. */
+/* Whole-source opacity. */
 uniform float opacity;
+
+/* 1 when only the characters that changed should animate. */
+uniform float scope_changed;
+
+/* 1 to play the motion backwards, for animating old text out. */
+uniform float reverse;
+
+/* Source-space translation, for scrolling. */
+uniform float2 scroll_offset;
+
+/* Source-space rectangle outside which nothing draws: x0, y0, x1, y1. */
+uniform float4 clip_rect;
 
 sampler_state point_clamp {
 	Filter    = Point;
@@ -75,34 +96,54 @@ sampler_state point_clamp {
 	AddressV  = Clamp;
 };
 
+sampler_state linear_clamp {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
 /* Must match slughorn::Atlas::INDIRECTION_SIZE. */
 #define SLUG_INDIRECTION_SIZE 32.0
 
-/* Hard cap on curves visited per band. Slug's bands hold only the curves that
- * overlap that band, so real glyphs sit far below this; the bound exists so the
- * loop is provably finite for every compiler on every backend. */
-#define SLUG_MAX_BAND_CURVES 32
+/* Hard cap on curves visited per band, so every loop is provably finite. Real
+ * glyph bands sit far below it; stroked outlines are the densest shapes. */
+#define SLUG_MAX_BAND_CURVES 64
+
+#define KIND_FILL       0.0
+#define KIND_OUTLINE    1.0
+#define KIND_SHADOW     2.0
+#define KIND_SOLID      3.0
+#define KIND_IMAGE      4.0
+#define KIND_IMAGE_TINT 5.0
+#define KIND_ROUNDRECT  6.0
 
 struct VertIn {
 	float4 pos       : POSITION;
 	float4 em        : TEXCOORD0;
-	float4 bandXform : TEXCOORD1;
-	float4 shapeData : TEXCOORD2;
-	float4 color     : TEXCOORD3;
-	float4 fx        : TEXCOORD4;
-	float4 pivot     : TEXCOORD5;
-	float4 motion    : TEXCOORD6;
+	float4 aBand     : TEXCOORD1;
+	float4 aShape    : TEXCOORD2;
+	float4 bBand     : TEXCOORD3;
+	float4 bShape    : TEXCOORD4;
+	float4 color     : TEXCOORD5;
+	float4 color2    : TEXCOORD6;
+	float4 fx        : TEXCOORD7;
+	float4 pivot     : TEXCOORD8;
+	float4 motion    : TEXCOORD9;
+	float4 grad      : TEXCOORD10;
 };
 
 struct VertOut {
 	float4 pos       : POSITION;
-	float2 emCoord   : TEXCOORD0;
-	float4 bandXform : TEXCOORD1;
-	float4 shapeData : TEXCOORD2;
-	float4 color     : TEXCOORD3;
-	float  fade      : TEXCOORD4;
-	float  solid     : TEXCOORD5;
-	float  blur      : TEXCOORD6;
+	float4 emSrc     : TEXCOORD0; /* em.xy, source-space position.xy */
+	float4 aBand     : TEXCOORD1;
+	float4 aShape    : TEXCOORD2;
+	float4 bBand     : TEXCOORD3;
+	float4 bShape    : TEXCOORD4;
+	float4 color     : TEXCOORD5;
+	float4 color2    : TEXCOORD6;
+	float4 grad      : TEXCOORD7;
+	float4 misc      : TEXCOORD8; /* fade, blur, code, knock A */
+	float4 misc2     : TEXCOORD9; /* knock B */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -114,7 +155,7 @@ float4 fetch_curve(float2 texel)
 	return curve_tex.SampleLevel(point_clamp, (texel + 0.5) * curve_texel, 0.0);
 }
 
-/* Returns the band texel decoded back to its original 0..65535 integers. */
+/* The band texel decoded back to its original 0..65535 integers. */
 float4 fetch_band(float2 texel)
 {
 	float4 v = band_tex.SampleLevel(point_clamp, (texel + 0.5) * band_texel, 0.0);
@@ -128,10 +169,8 @@ float4 fetch_band(float2 texel)
 
 /*
  * Root classification. The reference builds a 3-bit index from the sign bits of
- * y1/y2/y3 and looks it up in the constant 0x2E74, keeping bits 0 and 8 to get
- * "use first root" / "use second root".
- *
- * Writing s1/s2/s3 for those sign bits, that table is:
+ * y1/y2/y3 and looks it up in the constant 0x2E74. Writing s1/s2/s3 for those
+ * sign bits, that table is:
  *
  *   s3 s2 s1 | r1 r2        s3 s2 s1 | r1 r2
  *    0  0  0 |  0  0         1  0  0 |  1  0
@@ -143,8 +182,6 @@ float4 fetch_band(float2 texel)
  *
  *   r1 = (!s1 & s2) | (!s2 & s3)
  *   r2 = (!s3 & (s1 | s2)) | (s1 & !s2 & s3)
- *
- * Returned as a float2 of 0/1 so callers can multiply rather than branch.
  */
 float2 slug_RootFlags(float y1, float y2, float y3)
 {
@@ -158,8 +195,6 @@ float2 slug_RootFlags(float y1, float y2, float y3)
 	return float2(r1 ? 1.0 : 0.0, r2 ? 1.0 : 0.0);
 }
 
-/* Both roots of the quadratic, solved along x for a horizontal band. p12/p3 are
- * already relative to the sample point. */
 float2 slug_SolveHorizPoly(float4 p12, float2 p3)
 {
 	float2 a = p12.xy - p12.zw * 2.0 + p3;
@@ -172,8 +207,7 @@ float2 slug_SolveHorizPoly(float4 p12, float2 p3)
 	float t1 = (b.y - d) * ra;
 	float t2 = (b.y + d) * ra;
 
-	/* Near-linear segment: the quadratic term vanishes, so fall back to the
-	 * linear root and use it for both. */
+	/* Near-linear segment: fall back to the linear root. */
 	if (abs(a.y) < 1.0 / 65536.0) {
 		t1 = p12.y * rb;
 		t2 = t1;
@@ -204,12 +238,11 @@ float2 slug_SolveVertPoly(float4 p12, float2 p3)
 		      (a.y * t2 - b.y * 2.0) * t2 + p12.y);
 }
 
-/* Curve lists are stored as a flat run starting at the glyph's band block and
- * wrapping at the texture width. The reference did this with a shift and a
- * mask; band_width is a power of two, so the divide is exact here too. */
-float2 slug_CalcBandLoc(float2 glyphLoc, float offset)
+/* Curve lists are a flat run from the shape's band block that wraps at the
+ * texture width. */
+float2 slug_CalcBandLoc(float2 glyphLoc, float listOffset)
 {
-	float x = glyphLoc.x + offset;
+	float x = glyphLoc.x + listOffset;
 	float row = floor(x / band_width);
 
 	return float2(x - row * band_width, glyphLoc.y + row);
@@ -223,29 +256,15 @@ float slug_CalcCoverage(float xcov, float ycov, float xwgt, float ywgt)
 	return clamp(coverage, 0.0, 1.0);
 }
 
-float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, float2 bandMax, float blurPixels)
+/* Coverage of one shape at `renderCoord`. `pixelsPerEm` comes from the caller,
+ * which takes the derivative outside any branch. */
+float slug_Render(float2 renderCoord, float2 pixelsPerEm, float4 bandTransform, float4 shapeData)
 {
-	/* Screen-space derivative of the em coordinate: this is what makes the
-	 * result resolution-independent. Because OBS renders a source with the
-	 * scene transform already applied, this reflects real on-screen pixel
-	 * density, so scaling the source in the preview re-solves coverage at the
-	 * new size rather than magnifying a bitmap. */
-	float2 emsPerPixel = fwidth(renderCoord);
-	float2 pixelsPerEm = 1.0 / max(emsPerPixel, 1e-9);
+	float2 glyphLoc = shapeData.xy;
+	float2 bandMax = shapeData.zw;
 
-	/* Blur, for MOTION_BLUR. Slug's coverage is an analytic ramp one pixel
-	 * wide, and pixelsPerEm is the only thing that sets that width -- telling
-	 * the solve there are fewer pixels per em spreads the same ramp over
-	 * `blurPixels` of them instead. So this is a real distance-field blur that
-	 * costs one divide, not a multi-tap sample. The quad is grown to match in
-	 * render/geometry.cpp, otherwise the fringe would be clipped square. */
-	pixelsPerEm /= max(blurPixels, 1.0);
-
-	/* O(1) band lookup through the per-axis indirection tables. */
-	float qY = clamp(floor(renderCoord.y * bandTransform.y + bandTransform.w),
-			 0.0, SLUG_INDIRECTION_SIZE - 1.0);
-	float qX = clamp(floor(renderCoord.x * bandTransform.x + bandTransform.z),
-			 0.0, SLUG_INDIRECTION_SIZE - 1.0);
+	float qY = clamp(floor(renderCoord.y * bandTransform.y + bandTransform.w), 0.0, SLUG_INDIRECTION_SIZE - 1.0);
+	float qX = clamp(floor(renderCoord.x * bandTransform.x + bandTransform.z), 0.0, SLUG_INDIRECTION_SIZE - 1.0);
 
 	float bandY = fetch_band(float2(glyphLoc.x + qY, glyphLoc.y)).r;
 	float bandX = fetch_band(float2(glyphLoc.x + SLUG_INDIRECTION_SIZE + qX, glyphLoc.y)).r;
@@ -254,8 +273,7 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 	float xcov = 0.0;
 	float xwgt = 0.0;
 
-	float2 hbandData = fetch_band(float2(glyphLoc.x + 2.0 * SLUG_INDIRECTION_SIZE + bandY,
-					     glyphLoc.y)).xy;
+	float2 hbandData = fetch_band(float2(glyphLoc.x + 2.0 * SLUG_INDIRECTION_SIZE + bandY, glyphLoc.y)).xy;
 	float2 hbandLoc = slug_CalcBandLoc(glyphLoc, hbandData.y);
 
 	for (int hi = 0; hi < SLUG_MAX_BAND_CURVES; hi++) {
@@ -267,9 +285,8 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 		float4 p12 = fetch_curve(curveLoc) - float4(renderCoord, renderCoord);
 		float2 p3  = fetch_curve(float2(curveLoc.x + 1.0, curveLoc.y)).xy - renderCoord;
 
-		/* Curves are sorted by descending x, so once the whole curve is more
-		 * than half a pixel left of the sample the rest of the band cannot
-		 * contribute. */
+		/* Curves are sorted by descending x: once one is wholly half a pixel
+		 * left of the sample, the rest of the band cannot contribute. */
 		if (max(max(p12.x, p12.z), p3.x) * pixelsPerEm.x < -0.5)
 			break;
 
@@ -322,27 +339,26 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 	return slug_CalcCoverage(xcov, ycov, xwgt, ywgt);
 }
 
+/* A zero band scale marks an absent shape. */
+float slug_Optional(float2 renderCoord, float2 pixelsPerEm, float4 bandTransform, float4 shapeData)
+{
+	if (bandTransform.x == 0.0 && bandTransform.y == 0.0)
+		return 0.0;
+
+	return slug_Render(renderCoord, pixelsPerEm, bandTransform, shapeData);
+}
+
 /* ------------------------------------------------------------------------- */
-/* Stages                                                                     */
+/* Motion                                                                     */
 /* ------------------------------------------------------------------------- */
 
 /*
- * Per-glyph motion.
+ * Each quad carries its own start time and duration, so the phase is derived
+ * here from the `elapsed` uniform and the vertex and index buffers stay static
+ * while text animates: an animation running for hours costs a few uniform
+ * updates per frame and no rebuild.
  *
- * Every glyph carries its own start time and duration, so the phase is derived
- * here from the `elapsed` uniform rather than recomputed on the CPU. That keeps
- * the vertex and index buffers completely static while text is animating: a
- * ticker or typewriter running for hours costs one uniform update per frame and
- * no geometry rebuild at all. Block-level motion (scrolling, rotation) is a
- * matrix-stack translation on the CPU instead, for the same reason.
- *
- * `param` means something different per preset -- a distance, a scale, an angle,
- * a blur width -- which is why the properties dialog relabels and re-ranges its
- * one control rather than offering the same "Amount" for all of them.
- *
- * fx     = (mode, param, startTime, duration)
- * pivot  = (pivotX, pivotY, staggerIndex, unused)
- * motion = (dirX, dirY, radiansPerSecond, unused)
+ * Must stay in sync with enum class Motion in src/core/types.hpp.
  */
 #define MOTION_NONE       0
 #define MOTION_FADE       1
@@ -351,14 +367,12 @@ float slug_Render(float2 renderCoord, float4 bandTransform, float2 glyphLoc, flo
 #define MOTION_TYPEWRITER 4
 #define MOTION_WAVE       5
 #define MOTION_BLUR       6
-#define MOTION_ROTATE     7
+#define MOTION_SPIN       7
 #define MOTION_BOUNCE     8
 
 #define SLUG_DEG_TO_RAD 0.017453292
 
-/* Overshoot easing for MOTION_BOUNCE: the standard back-out curve, which passes
- * 1 at about 70% of the way through and settles back. The constants are the
- * conventional 1.70158 / 2.70158 pair. */
+/* The standard back-out curve: passes 1 at about 70% and settles back. */
 float slug_BackOut(float t)
 {
 	float u = t - 1.0;
@@ -373,21 +387,28 @@ VertOut VSSlug(VertIn v)
 	float4 pos   = v.pos;
 	float  mode  = v.fx.x;
 	float  param = v.fx.y;
-	float  start = v.fx.z;
 	float  dur   = max(v.fx.w, 1e-4);
 
 	float2 dir   = v.motion.xy;
 	float  omega = v.motion.z;
 
-	/* Linear progress through this glyph's own window, then smoothstep. */
-	float phase = clamp((elapsed - start) / dur, 0.0, 1.0);
+	/* A text-change replay animates only the characters that changed; the
+	 * rest hold their final state. */
+	bool onlyChanged = scope_changed > 0.5;
+	float start = onlyChanged ? v.pivot.w : v.fx.z;
+	bool settled = onlyChanged && v.pivot.w < 0.0;
+
+	float phase = settled ? 1.0 : clamp((elapsed - start) / dur, 0.0, 1.0);
+
+	if (reverse > 0.5)
+		phase = 1.0 - phase;
+
 	float eased = phase * phase * (3.0 - 2.0 * phase);
 
 	float fade = 1.0;
 	float blur = 0.0;
 
 	if (mode < 0.5) {
-		/* MOTION_NONE: fully visible, no displacement. */
 		fade = 1.0;
 	} else if (mode < 1.5) {
 		/* MOTION_FADE */
@@ -397,34 +418,26 @@ VertOut VSSlug(VertIn v)
 		pos.xy += dir * ((1.0 - eased) * param);
 		fade = eased;
 	} else if (mode < 3.5) {
-		/* MOTION_POP: scale about the glyph's own pivot. param is the
-		 * scale it starts at, so 0.4 grows into place and 2.0 shrinks. */
+		/* MOTION_POP: scale about the glyph's own centre from `param`. */
 		float s = lerp(param, 1.0, eased);
 
 		pos.xy = v.pivot.xy + (pos.xy - v.pivot.xy) * s;
 		fade = eased;
 	} else if (mode < 4.5) {
-		/* MOTION_TYPEWRITER: hard reveal, no partial alpha. */
+		/* MOTION_TYPEWRITER: hard reveal. */
 		fade = phase >= 1.0 ? 1.0 : 0.0;
 	} else if (mode < 5.5) {
-		/* MOTION_WAVE: continuous, never settles. param is amplitude in
-		 * source pixels along `dir`. The wave is spread along the text by
-		 * the same start time that staggers the one-shot presets, so
-		 * "apply per word" ripples word by word rather than letter by
-		 * letter without needing a second control. */
-		pos.xy += dir * (sin((elapsed - start) * omega) * param);
+		/* MOTION_WAVE: never settles; spread along the text by the same
+		 * stagger that delays the one-shot presets. */
+		pos.xy += dir * (sin((elapsed - v.fx.z) * omega) * param);
 		fade = 1.0;
 	} else if (mode < 6.5) {
-		/* MOTION_BLUR: resolves out of a blur rather than moving. The
-		 * width is in source pixels and is applied in the coverage solve;
-		 * see slug_Render. */
+		/* MOTION_BLUR: resolves out of a blur `param` pixels wide. */
 		blur = (1.0 - eased) * param;
 		fade = eased;
 	} else if (mode < 7.5) {
-		/* MOTION_ROTATE: spin into place about the glyph's own pivot.
-		 * Rotation is affine, so the em coordinates carried by the four
-		 * corners still interpolate to the correct em point per fragment
-		 * and the coverage solve is unaffected. */
+		/* MOTION_SPIN: rotation is affine, so the em coordinates still
+		 * interpolate to the right glyph point. */
 		float a = param * SLUG_DEG_TO_RAD * (1.0 - eased);
 		float sa = sin(a);
 		float ca = cos(a);
@@ -434,55 +447,113 @@ VertOut VSSlug(VertIn v)
 		pos.xy = v.pivot.xy + float2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
 		fade = eased;
 	} else {
-		/* MOTION_BOUNCE: travels in from `dir` like Slide, but overshoots
-		 * and settles back. The fade finishes in the first third so the
-		 * glyph is solid while it is still moving -- fading through an
-		 * overshoot looks like a mistake rather than a bounce. */
+		/* MOTION_BOUNCE: overshoots and settles; solid by a third of the way
+		 * so the overshoot does not read as a fade. */
 		pos.xy += dir * ((1.0 - slug_BackOut(phase)) * param);
 		fade = min(phase * 3.0, 1.0);
 	}
 
-	/* The w component has to be forced to 1 here. libobs describes the POSITION
-	 * attribute as a full float4 (struct vec3 is SSE-aligned and 16 bytes wide,
-	 * so the fourth float is part of the stride and is fed to the shader), but
-	 * nothing in libobs ever writes a 1 into it. Transforming a w = 0 position
-	 * by an orthographic ViewProj drops the translation row and yields a clip
-	 * position with w = 0, which every triangle degenerates to -- the source
-	 * reports its size correctly and draws absolutely nothing. Every stock OBS
-	 * effect rebuilds the position the same way for this reason. */
+	pos.xy += scroll_offset;
+
+	/* libobs never writes POSITION.w; an orthographic transform of w = 0
+	 * collapses every triangle. */
 	o.pos       = mul(float4(pos.xyz, 1.0), ViewProj);
-	o.emCoord   = v.em.xy;
-	o.bandXform = v.bandXform;
-	o.shapeData = v.shapeData;
+	o.emSrc     = float4(v.em.xy, pos.xy);
+	o.aBand     = v.aBand;
+	o.aShape    = v.aShape;
+	o.bBand     = v.bBand;
+	o.bShape    = v.bShape;
 	o.color     = v.color;
-	o.fade      = fade;
-	o.solid     = v.em.z;
-	o.blur      = blur;
+	o.color2    = v.color2;
+	o.grad      = v.grad;
+	o.misc      = float4(fade, blur, v.em.z, v.em.w);
+	o.misc2     = float4(v.motion.w, 0.0, 0.0, 0.0);
 
 	return o;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Pixels                                                                     */
+/* ------------------------------------------------------------------------- */
+
+float sd_RoundBox(float2 p, float2 halfSize, float radius)
+{
+	float2 q = abs(p) - halfSize + radius;
+
+	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
 float4 PSSlug(VertOut f) : TARGET
 {
-	/* Underline and strikeout bars carry no curves, so they are filled outright
-	 * instead of being run through the coverage solve, whose band fetches would
-	 * otherwise read whatever the atlas happens to hold at texel 0.
-	 *
-	 * The flag is constant across a whole quad, so every fragment of a
-	 * primitive takes the same path -- this branch never splits a derivative
-	 * quad, which is what would make the fwidth() inside slug_Render undefined.
-	 * It returns rather than selecting a value so that a flattening compiler
-	 * cannot fold the discarded branch's arithmetic into the result. */
-	if (f.solid > 0.5)
-		return float4(f.color.rgb, f.color.a * f.fade * opacity);
+	float2 em  = f.emSrc.xy;
+	float2 src = f.emSrc.zw;
 
-	float fill = slug_Render(f.emCoord, f.bandXform, f.shapeData.xy, f.shapeData.zw, f.blur);
+	/* Every derivative, up front and unconditionally. */
+	float2 emsPerPixel = fwidth(em);
+	float2 pixelsPerEm = 1.0 / max(emsPerPixel, 1e-9);
 
-	/* Coverage is folded into alpha rather than discarded, so glyphs stay
-	 * antialiased against whatever is behind them while animating. */
-	float a = fill * f.color.a * f.fade * opacity;
+	float fade  = f.misc.x;
+	float blur  = f.misc.y;
+	float code  = f.misc.z;
+	float knockA = f.misc.w;
+	float knockB = f.misc2.x;
 
-	return float4(f.color.rgb, a);
+	float gradType = floor(code / 8.0 + 0.01);
+	float kind = code - gradType * 8.0;
+
+	/* Blur works by telling the solve there are fewer pixels per em: Slug's
+	 * coverage is an analytic ramp one pixel wide, and this spreads it over
+	 * `blur` of them for the cost of a divide. */
+	float2 ppe = pixelsPerEm / max(blur, 1.0);
+
+	if (src.x < clip_rect.x || src.y < clip_rect.y || src.x > clip_rect.z || src.y > clip_rect.w)
+		return float4(0.0, 0.0, 0.0, 0.0);
+
+	float4 color = f.color;
+
+	if (gradType > 0.5) {
+		float t = gradType < 1.5 ? f.grad.x : length(f.grad.xy);
+
+		color = lerp(f.color, f.color2, clamp(t, 0.0, 1.0));
+	}
+
+	float coverage = 1.0;
+
+	if (kind < KIND_FILL + 0.5) {
+		coverage = slug_Render(em, ppe, f.aBand, f.aShape);
+	} else if (kind < KIND_OUTLINE + 0.5) {
+		float ring = slug_Render(em, ppe, f.bBand, f.bShape);
+		float inFront = slug_Render(em, ppe, f.aBand, f.aShape) * knockA;
+
+		coverage = ring * (1.0 - inFront);
+	} else if (kind < KIND_SHADOW + 0.5) {
+		float2 glyph = em + f.grad.zw;
+
+		float cast = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
+		float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
+				    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
+
+		coverage = cast * (1.0 - inFront);
+	} else if (kind < KIND_SOLID + 0.5) {
+		coverage = 1.0;
+	} else if (kind < KIND_IMAGE + 0.5) {
+		float4 texel = image_tex.SampleLevel(linear_clamp, em, 0.0);
+
+		return float4(texel.rgb, texel.a * color.a * fade * opacity);
+	} else if (kind < KIND_IMAGE_TINT + 0.5) {
+		float4 texel = image_tex.SampleLevel(linear_clamp, em, 0.0);
+
+		coverage = texel.a;
+	} else {
+		/* em is the pixel offset from the box centre; aBand carries the half
+		 * size and the corner radius. */
+		float d = sd_RoundBox(em, f.aBand.xy, f.aBand.z);
+		float aa = max(max(emsPerPixel.x, emsPerPixel.y), 1e-4);
+
+		coverage = clamp(0.5 - d / aa, 0.0, 1.0);
+	}
+
+	return float4(color.rgb, coverage * color.a * fade * opacity);
 }
 
 technique Draw

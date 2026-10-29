@@ -198,7 +198,8 @@ FontFile *FontManager::openFile(const std::string &path, int faceIndex)
 	}
 
 	file->hasColorLayers = hasTable(ft, FT_MAKE_TAG('C', 'O', 'L', 'R'));
-	file->hasColorBitmaps = hasTable(ft, FT_MAKE_TAG('C', 'B', 'D', 'T')) || hasTable(ft, FT_MAKE_TAG('s', 'b', 'i', 'x'));
+	file->hasColorBitmaps = hasTable(ft, FT_MAKE_TAG('C', 'B', 'D', 'T')) ||
+				hasTable(ft, FT_MAKE_TAG('s', 'b', 'i', 'x'));
 	file->variable = FT_HAS_MULTIPLE_MASTERS(ft) != 0;
 
 	FontFile *raw = file.get();
@@ -339,8 +340,8 @@ FontInstance *FontManager::acquire(const FontSpec &spec)
 
 bool FontManager::isEmoji(uint32_t cp)
 {
-	return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x1F1E6 && cp <= 0x1F1FF) || cp == 0x1F004 ||
-	       cp == 0x1F0CF || cp == 0x1F18E || (cp >= 0x1F191 && cp <= 0x1F19A);
+	return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x1F1E6 && cp <= 0x1F1FF) || cp == 0x1F004 || cp == 0x1F0CF ||
+	       cp == 0x1F18E || (cp >= 0x1F191 && cp <= 0x1F19A);
 }
 
 FontInstance *FontManager::fallbackFor(const FontSpec &spec, uint32_t codepoint, bool preferColor)

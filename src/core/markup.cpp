@@ -159,12 +159,12 @@ std::optional<Rgba> parseColor(const std::string &text)
 	};
 
 	static const Named kNames[] = {
-		{"black", 0x000000},  {"white", 0xFFFFFF},   {"red", 0xFF0000},    {"green", 0x008000},
-		{"lime", 0x00FF00},   {"blue", 0x0000FF},    {"yellow", 0xFFFF00}, {"cyan", 0x00FFFF},
+		{"black", 0x000000},  {"white", 0xFFFFFF},   {"red", 0xFF0000},     {"green", 0x008000},
+		{"lime", 0x00FF00},   {"blue", 0x0000FF},    {"yellow", 0xFFFF00},  {"cyan", 0x00FFFF},
 		{"aqua", 0x00FFFF},   {"magenta", 0xFF00FF}, {"fuchsia", 0xFF00FF}, {"orange", 0xFFA500},
-		{"purple", 0x800080}, {"pink", 0xFFC0CB},    {"gray", 0x808080},   {"grey", 0x808080},
-		{"silver", 0xC0C0C0}, {"gold", 0xFFD700},    {"navy", 0x000080},   {"teal", 0x008080},
-		{"maroon", 0x800000}, {"olive", 0x808000},   {"brown", 0xA52A2A},  {"violet", 0xEE82EE},
+		{"purple", 0x800080}, {"pink", 0xFFC0CB},    {"gray", 0x808080},    {"grey", 0x808080},
+		{"silver", 0xC0C0C0}, {"gold", 0xFFD700},    {"navy", 0x000080},    {"teal", 0x008080},
+		{"maroon", 0x800000}, {"olive", 0x808000},   {"brown", 0xA52A2A},   {"violet", 0xEE82EE},
 	};
 
 	for (const Named &n : kNames) {

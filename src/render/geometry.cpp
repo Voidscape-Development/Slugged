@@ -199,7 +199,9 @@ std::array<Corner, 4> glyphCorners(const EmBox &box, float margin, float penX, f
 	const float ex1 = box.x1 + margin;
 	const float ey1 = box.y1 + margin;
 
-	auto at = [&](float ex, float ey) { return Corner{penX + ex * size, baselineY - ey * size, ex, ey}; };
+	auto at = [&](float ex, float ey) {
+		return Corner{penX + ex * size, baselineY - ey * size, ex, ey};
+	};
 
 	return {at(ex0, ey0), at(ex1, ey0), at(ex1, ey1), at(ex0, ey1)};
 }
@@ -228,7 +230,9 @@ GradientFn screenGradient(const Fill &fill, float bx0, float by0, float bx1, flo
 		const float rx = std::max((bx1 - bx0) * 0.5f, 1e-3f);
 		const float ry = std::max((by1 - by0) * 0.5f, 1e-3f);
 
-		return [=](const Corner &c) { return std::pair<float, float>{(c.x - cx) / rx, (c.y - cy) / ry}; };
+		return [=](const Corner &c) {
+			return std::pair<float, float>{(c.x - cx) / rx, (c.y - cy) / ry};
+		};
 	}
 
 	type = 1;
@@ -250,7 +254,9 @@ GradientFn screenGradient(const Fill &fill, float bx0, float by0, float bx1, flo
 
 	const float span = std::max(hi - lo, 1e-3f);
 
-	return [=](const Corner &c) { return std::pair<float, float>{(c.x * dx + c.y * dy - lo) / span, 0.0f}; };
+	return [=](const Corner &c) {
+		return std::pair<float, float>{(c.x * dx + c.y * dy - lo) / span, 0.0f};
+	};
 }
 
 // A COLR layer's gradient, defined in the glyph's own em space.
@@ -276,7 +282,9 @@ GradientFn layerGradient(const LayerPaint &paint, int &type)
 
 		const LayerPaint p = paint;
 
-		return [=](const Corner &c) { return std::pair<float, float>{(c.ex - p.x0) / p.r, (c.ey - p.y0) / p.r}; };
+		return [=](const Corner &c) {
+			return std::pair<float, float>{(c.ex - p.x0) / p.r, (c.ey - p.y0) / p.r};
+		};
 	}
 
 	return nullptr;
@@ -362,9 +370,9 @@ FrameRequests collectRequests(const LayoutResult &layout)
 
 		const std::string key = fillKey(g.font, g.glyphIndex);
 		const bool outline = wantsOutline(*g.style);
-		const std::string stroke =
-			outline ? strokeKey(g.font, g.glyphIndex, strokeWidthEm(*g.style, g.sizePx), g.style->outline.join)
-				: std::string();
+		const std::string stroke = outline ? strokeKey(g.font, g.glyphIndex, strokeWidthEm(*g.style, g.sizePx),
+							       g.style->outline.join)
+						   : std::string();
 
 		if (seen.count(key) && (!outline || seen.count(stroke)))
 			continue;
@@ -497,8 +505,9 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				strokeKey(g.font, g.glyphIndex, strokeWidthEm(style, size), style.outline.join));
 
 		// Fill alpha decides how much a fill hides what is behind it.
-		const float fillAlpha = style.fill.type == FillType::Solid ? style.fill.color.a
-									   : std::max(style.fill.color.a, style.fill.color2.a);
+		const float fillAlpha = style.fill.type == FillType::Solid
+						? style.fill.color.a
+						: std::max(style.fill.color.a, style.fill.color2.a);
 
 		// ---- shadow ----------------------------------------------------
 		if (style.shadow.enabled && size > 0.0f) {
@@ -529,8 +538,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				const auto corners = glyphCorners(box, margin, g.x + sx, g.y + sy, size);
 
 				emit(shadows, corners, a, nullptr);
-				stats.ink.add(g.x + sx + box.x0 * size, g.y + sy - box.y1 * size, g.x + sx + box.x1 * size,
-					      g.y + sy - box.y0 * size);
+				stats.ink.add(g.x + sx + box.x0 * size, g.y + sy - box.y1 * size,
+					      g.x + sx + box.x1 * size, g.y + sy - box.y0 * size);
 			} else if (shapes.bitmap) {
 				if (const auto slot = images.slot(imageKey(g.font, g.glyphIndex))) {
 					const BitmapGlyph &bmp = *shapes.bitmap;
@@ -542,8 +551,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 					a.color = style.shadow.color;
 
 					emit(shadows,
-					     rectCorners(x0, y0, x0 + bmp.emWidth * size, y0 + bmp.emHeight * size, slot->u0,
-							 slot->v0, slot->u1, slot->v1),
+					     rectCorners(x0, y0, x0 + bmp.emWidth * size, y0 + bmp.emHeight * size,
+							 slot->u0, slot->v0, slot->u1, slot->v1),
 					     a, nullptr);
 				}
 			}
@@ -562,7 +571,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 			const EmBox box = boxOf(*strokeShape);
 
 			emit(outlines, glyphCorners(box, margin, g.x, g.y, size), a, nullptr);
-			stats.ink.add(g.x + box.x0 * size, g.y - box.y1 * size, g.x + box.x1 * size, g.y - box.y0 * size);
+			stats.ink.add(g.x + box.x0 * size, g.y - box.y1 * size, g.x + box.x1 * size,
+				      g.y - box.y0 * size);
 		}
 
 		// ---- fill --------------------------------------------------------
@@ -608,7 +618,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				a.kind = QuadKind::Image;
 				a.color = Rgba{1.0f, 1.0f, 1.0f, 1.0f};
 
-				emit(fills, rectCorners(x0, y0, x1, y1, slot->u0, slot->v0, slot->u1, slot->v1), a, nullptr);
+				emit(fills, rectCorners(x0, y0, x1, y1, slot->u0, slot->v0, slot->u1, slot->v1), a,
+				     nullptr);
 				stats.ink.add(x0, y0, x1, y1);
 			}
 		} else if (fillShape) {
@@ -629,7 +640,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				gradient = screenGradient(style.fill, 0.0f, 0.0f, boxX1, boxY1, a.gradientType);
 
 			emit(fills, glyphCorners(box, margin, g.x, g.y, size), a, gradient);
-			stats.ink.add(g.x + box.x0 * size, g.y - box.y1 * size, g.x + box.x1 * size, g.y - box.y0 * size);
+			stats.ink.add(g.x + box.x0 * size, g.y - box.y1 * size, g.x + box.x1 * size,
+				      g.y - box.y0 * size);
 		}
 	}
 

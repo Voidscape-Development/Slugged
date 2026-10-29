@@ -134,7 +134,8 @@ struct Item {
 
 bool isWhitespace(uint32_t cp)
 {
-	return cp == ' ' || cp == '\t' || cp == 0x00A0 || cp == 0x3000 || cp == 0x200B || (cp >= 0x2000 && cp <= 0x200A);
+	return cp == ' ' || cp == '\t' || cp == 0x00A0 || cp == 0x3000 || cp == 0x200B ||
+	       (cp >= 0x2000 && cp <= 0x200A);
 }
 
 // Characters that only make sense attached to their neighbour: joiners,
@@ -272,9 +273,10 @@ ShapedParagraph Shaper::shape(const std::vector<ShapeRun> &runs, Direction baseD
 		// goes to a colour font even when the run's own font has a plain
 		// black-and-white version of it.
 		size_t peek = next;
-		const bool wantsColor = FontManager::isEmoji(cp) || (next < text.size() && utf8Next(text, peek) == 0xFE0F);
-		const bool preferredIsColor =
-			preferred && (preferred->file->hasColorLayers || preferred->file->hasColorBitmaps);
+		const bool wantsColor = FontManager::isEmoji(cp) ||
+					(next < text.size() && utf8Next(text, peek) == 0xFE0F);
+		const bool preferredIsColor = preferred &&
+					      (preferred->file->hasColorLayers || preferred->file->hasColorBitmaps);
 
 		if (!items.empty() && items.back().run == run && items.back().level == level && isAttaching(cp)) {
 			font = items.back().font;

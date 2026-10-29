@@ -291,15 +291,17 @@ void walkPaint(ColrContext &ctx, FT_OpaquePaint opaque, const slughorn::Matrix &
 			for (int guard = 0; guard < 8; guard++) {
 				if (inner.format == FT_COLR_PAINTFORMAT_TRANSFORM) {
 					const FT_Affine23 &a = inner.u.transform.affine;
-					fillMatrix = fillMatrix * slughorn::Matrix{float(a.xx) / 65536.0f, float(a.yx) / 65536.0f,
-										   float(a.xy) / 65536.0f, float(a.yy) / 65536.0f,
-										   float(a.dx) * k, float(a.dy) * k};
+					fillMatrix = fillMatrix *
+						     slughorn::Matrix{float(a.xx) / 65536.0f, float(a.yx) / 65536.0f,
+								      float(a.xy) / 65536.0f, float(a.yy) / 65536.0f,
+								      float(a.dx) * k,        float(a.dy) * k};
 
 					if (!FT_Get_Paint(ctx.face, inner.u.transform.paint, &inner))
 						break;
 				} else if (inner.format == FT_COLR_PAINTFORMAT_TRANSLATE) {
-					fillMatrix = fillMatrix * slughorn::Matrix::translate(float(inner.u.translate.dx) * k,
-											      float(inner.u.translate.dy) * k);
+					fillMatrix = fillMatrix *
+						     slughorn::Matrix::translate(float(inner.u.translate.dx) * k,
+										 float(inner.u.translate.dy) * k);
 
 					if (!FT_Get_Paint(ctx.face, inner.u.translate.paint, &inner))
 						break;
@@ -340,14 +342,15 @@ void walkPaint(ColrContext &ctx, FT_OpaquePaint opaque, const slughorn::Matrix &
 		}
 
 		const slughorn::Matrix t{float(a.xx) / 65536.0f, float(a.yx) / 65536.0f, float(a.xy) / 65536.0f,
-					 float(a.yy) / 65536.0f, float(a.dx) * k, float(a.dy) * k};
+					 float(a.yy) / 65536.0f, float(a.dx) * k,        float(a.dy) * k};
 
 		walkPaint(ctx, paint.u.transform.paint, m * t);
 		break;
 	}
 	case FT_COLR_PAINTFORMAT_TRANSLATE:
 		walkPaint(ctx, paint.u.translate.paint,
-			  m * slughorn::Matrix::translate(float(paint.u.translate.dx) * k, float(paint.u.translate.dy) * k));
+			  m * slughorn::Matrix::translate(float(paint.u.translate.dx) * k,
+							  float(paint.u.translate.dy) * k));
 		break;
 	case FT_COLR_PAINTFORMAT_SCALE: {
 		const auto &s = paint.u.scale;
@@ -367,7 +370,8 @@ void walkPaint(ColrContext &ctx, FT_OpaquePaint opaque, const slughorn::Matrix &
 		const float cx = float(r.center_x) * k;
 		const float cy = float(r.center_y) * k;
 
-		walkPaint(ctx, r.paint, m * slughorn::Matrix{c, s, -s, c, cx * (1.0f - c) + s * cy, cy * (1.0f - c) - s * cx});
+		walkPaint(ctx, r.paint,
+			  m * slughorn::Matrix{c, s, -s, c, cx * (1.0f - c) + s * cy, cy * (1.0f - c) - s * cx});
 		break;
 	}
 	case FT_COLR_PAINTFORMAT_SKEW: {

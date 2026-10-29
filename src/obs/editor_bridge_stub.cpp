@@ -40,6 +40,8 @@ void closeFor(obs_source_t *source)
 	UNUSED_PARAMETER(source);
 }
 
+void registerTools() {}
+
 void shutdown() {}
 
 } // namespace editor

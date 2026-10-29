@@ -51,6 +51,9 @@ public:
 	void setZoom(float zoom);
 	float zoom() const { return _zoom; }
 
+	// Stops drawing the source. Safe from any thread.
+	void detach();
+
 	// Draws a checkerboard behind the source so partial alpha is visible.
 	void setShowCheckerboard(bool show) { _checkerboard = show; }
 

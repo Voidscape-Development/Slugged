@@ -43,8 +43,8 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 
 	auto guard = FontManager::instance().lock();
 
-	const LayoutResult layout = Layout::run(doc, fixed && !horizontalScroll ? innerWidth : 0.0f,
-						fixed ? innerHeight : 0.0f);
+	const LayoutResult layout =
+		Layout::run(doc, fixed && !horizontalScroll ? innerWidth : 0.0f, fixed ? innerHeight : 0.0f);
 
 	const FrameRequests requests = collectRequests(layout);
 
