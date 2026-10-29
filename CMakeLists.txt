@@ -119,6 +119,13 @@ foreach(_slugged_dep IN ITEMS slughorn harfbuzz SheenBidi)
   endif()
 endforeach()
 
+# slughorn adds its own -Werror (/WX on MSVC) as a plain compile option, which the
+# property above cannot remove. OBS's warning set includes flags slughorn is not
+# built against, so demote those warnings back to warnings for it.
+if(TARGET slughorn)
+  target_compile_options(slughorn PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX-,-Wno-error>)
+endif()
+
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE slughorn harfbuzz SheenBidi Freetype::Freetype)
 
 # fontconfig is the font-enumeration backend on Linux only; Windows uses

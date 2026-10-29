@@ -5,8 +5,8 @@
  * slughorn's reference GLSL frontend. Three things force it to differ from that
  * reference, all of them properties of libobs's graphics abstraction:
  *
- * 1. No integer texture formats. slughorn's RGBA16UI band texture is uploaded as
- *    GS_RGBA16 (UNORM) instead. A UNORM16 fetch returns v/65535, so every band
+ * 1. No integer texture formats. slughorn's RG16UI band texture is uploaded as
+ *    GS_RG16 (UNORM) instead. A UNORM16 fetch returns v/65535, so every band
  *    read is multiplied back by 65535 and rounded; fp32 represents every 16-bit
  *    integer exactly, so the round trip is lossless.
  *
@@ -69,8 +69,11 @@ uniform texture2d image_tex;
 uniform float2 curve_texel;
 uniform float2 band_texel;
 
-/* Width of the band texture in texels, to unwrap curve lists that wrap rows. */
+/* Widths of the data textures in texels. Band lists and curves are packed
+ * densely and wrap from one row to the next, so every fetch past the first is
+ * re-derived against the width. */
 uniform float band_width;
+uniform float curve_width;
 
 /* Seconds on the animation clock. */
 uniform float elapsed;
@@ -107,7 +110,7 @@ sampler_state linear_clamp {
 
 /* Hard cap on curves visited per band, so every loop is provably finite. Real
  * glyph bands sit far below it; stroked outlines are the densest shapes. */
-#define SLUG_MAX_BAND_CURVES 64
+#define SLUG_MAX_BAND_CURVES 128
 
 #define KIND_FILL       0.0
 #define KIND_OUTLINE    1.0
@@ -195,26 +198,33 @@ float2 slug_RootFlags(float y1, float y2, float y3)
 	return float2(r1 ? 1.0 : 0.0, r2 ? 1.0 : 0.0);
 }
 
+/* Both roots of a*t^2 - 2*b*t + c without catastrophic cancellation: the root
+ * near zero is taken as c / q rather than as a difference of nearly equal
+ * values, which is what used to break nearly straight curves. */
+float2 slug_SolveRoots(float a, float b, float c)
+{
+	float disc = b * b - a * c;
+	float d = sqrt(max(disc, 0.0));
+	float q = b >= 0.0 ? b + d : b - d;
+	float tFar = q / a;
+	float tNear = disc > 0.0 ? c / q : tFar;
+
+	return b >= 0.0 ? float2(tNear, tFar) : float2(tFar, tNear);
+}
+
 float2 slug_SolveHorizPoly(float4 p12, float2 p3)
 {
 	float2 a = p12.xy - p12.zw * 2.0 + p3;
 	float2 b = p12.xy - p12.zw;
 
-	float ra = 1.0 / a.y;
-	float rb = 0.5 / b.y;
-	float d  = sqrt(max(b.y * b.y - a.y * p12.y, 0.0));
-
-	float t1 = (b.y - d) * ra;
-	float t2 = (b.y + d) * ra;
+	float2 t = slug_SolveRoots(a.y, b.y, p12.y);
 
 	/* Near-linear segment: fall back to the linear root. */
-	if (abs(a.y) < 1.0 / 65536.0) {
-		t1 = p12.y * rb;
-		t2 = t1;
-	}
+	if (abs(a.y) < 1.0 / 65536.0)
+		t = float2(p12.y * (0.5 / b.y), p12.y * (0.5 / b.y));
 
-	return float2((a.x * t1 - b.x * 2.0) * t1 + p12.x,
-		      (a.x * t2 - b.x * 2.0) * t2 + p12.x);
+	return float2((a.x * t.x - b.x * 2.0) * t.x + p12.x,
+		      (a.x * t.y - b.x * 2.0) * t.y + p12.x);
 }
 
 float2 slug_SolveVertPoly(float4 p12, float2 p3)
@@ -222,30 +232,34 @@ float2 slug_SolveVertPoly(float4 p12, float2 p3)
 	float2 a = p12.xy - p12.zw * 2.0 + p3;
 	float2 b = p12.xy - p12.zw;
 
-	float ra = 1.0 / a.x;
-	float rb = 0.5 / b.x;
-	float d  = sqrt(max(b.x * b.x - a.x * p12.x, 0.0));
+	float2 t = slug_SolveRoots(a.x, b.x, p12.x);
 
-	float t1 = (b.x - d) * ra;
-	float t2 = (b.x + d) * ra;
+	if (abs(a.x) < 1.0 / 65536.0)
+		t = float2(p12.x * (0.5 / b.x), p12.x * (0.5 / b.x));
 
-	if (abs(a.x) < 1.0 / 65536.0) {
-		t1 = p12.x * rb;
-		t2 = t1;
-	}
-
-	return float2((a.y * t1 - b.y * 2.0) * t1 + p12.y,
-		      (a.y * t2 - b.y * 2.0) * t2 + p12.y);
+	return float2((a.y * t.x - b.y * 2.0) * t.x + p12.y,
+		      (a.y * t.y - b.y * 2.0) * t.y + p12.y);
 }
 
-/* Curve lists are a flat run from the shape's band block that wraps at the
- * texture width. */
+/* A position `listOffset` texels after `glyphLoc` in the band texture, wrapping
+ * onto following rows. */
 float2 slug_CalcBandLoc(float2 glyphLoc, float listOffset)
 {
 	float x = glyphLoc.x + listOffset;
 	float row = floor(x / band_width);
 
 	return float2(x - row * band_width, glyphLoc.y + row);
+}
+
+/* A curve's second texel. Connected curves share texels (a chain of N curves
+ * costs N + 1), so curves are not aligned to rows and the second texel can sit
+ * at the start of the next one. */
+float2 slug_CalcCurveLoc(float2 curveLoc)
+{
+	float x = curveLoc.x + 1.0;
+	float row = floor(x / curve_width);
+
+	return float2(x - row * curve_width, curveLoc.y + row);
 }
 
 float slug_CalcCoverage(float xcov, float ycov, float xwgt, float ywgt)
@@ -274,16 +288,15 @@ float slug_Render(float2 renderCoord, float2 pixelsPerEm, float4 bandTransform, 
 	float xwgt = 0.0;
 
 	float2 hbandData = fetch_band(float2(glyphLoc.x + 2.0 * SLUG_INDIRECTION_SIZE + bandY, glyphLoc.y)).xy;
-	float2 hbandLoc = slug_CalcBandLoc(glyphLoc, hbandData.y);
-
 	for (int hi = 0; hi < SLUG_MAX_BAND_CURVES; hi++) {
 		if (float(hi) >= hbandData.x)
 			break;
 
-		float2 curveLoc = fetch_band(float2(hbandLoc.x + float(hi), hbandLoc.y)).xy;
+		/* Re-derived each time, so a list may run across rows. */
+		float2 curveLoc = fetch_band(slug_CalcBandLoc(glyphLoc, hbandData.y + float(hi))).xy;
 
 		float4 p12 = fetch_curve(curveLoc) - float4(renderCoord, renderCoord);
-		float2 p3  = fetch_curve(float2(curveLoc.x + 1.0, curveLoc.y)).xy - renderCoord;
+		float2 p3  = fetch_curve(slug_CalcCurveLoc(curveLoc)).xy - renderCoord;
 
 		/* Curves are sorted by descending x: once one is wholly half a pixel
 		 * left of the sample, the rest of the band cannot contribute. */
@@ -309,16 +322,15 @@ float slug_Render(float2 renderCoord, float2 pixelsPerEm, float4 bandTransform, 
 
 	float2 vbandData = fetch_band(float2(glyphLoc.x + 2.0 * SLUG_INDIRECTION_SIZE + bandMax.y + 1.0 + bandX,
 					     glyphLoc.y)).xy;
-	float2 vbandLoc = slug_CalcBandLoc(glyphLoc, vbandData.y);
-
 	for (int vi = 0; vi < SLUG_MAX_BAND_CURVES; vi++) {
 		if (float(vi) >= vbandData.x)
 			break;
 
-		float2 curveLoc = fetch_band(float2(vbandLoc.x + float(vi), vbandLoc.y)).xy;
+		/* Re-derived each time, so a list may run across rows. */
+		float2 curveLoc = fetch_band(slug_CalcBandLoc(glyphLoc, vbandData.y + float(vi))).xy;
 
 		float4 p12 = fetch_curve(curveLoc) - float4(renderCoord, renderCoord);
-		float2 p3  = fetch_curve(float2(curveLoc.x + 1.0, curveLoc.y)).xy - renderCoord;
+		float2 p3  = fetch_curve(slug_CalcCurveLoc(curveLoc)).xy - renderCoord;
 
 		if (max(max(p12.y, p12.w), p3.y) * pixelsPerEm.y < -0.5)
 			break;

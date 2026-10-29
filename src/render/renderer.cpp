@@ -132,9 +132,37 @@ bool createBuffers(const GeometryBuffers &buffers, gs_vertbuffer_t *&vertices, g
 	return true;
 }
 
+// The libobs format with the same bytes per texel as a slughorn texture.
+gs_color_format textureFormat(slughorn::Atlas::TextureData::Format format)
+{
+	using Format = slughorn::Atlas::TextureData::Format;
+
+	switch (format) {
+	case Format::RGBA32F:
+		return GS_RGBA32F;
+	case Format::RGBA16F:
+		return GS_RGBA16F;
+	case Format::RG16UI:
+		return GS_RG16;
+	case Format::RGBA16UI:
+		return GS_RGBA16;
+	case Format::RGBA8:
+		return GS_RGBA;
+	case Format::R32F:
+		return GS_R32F;
+	case Format::RGB32F:
+		break;
+	}
+
+	return GS_UNKNOWN;
+}
+
 std::shared_ptr<Renderer::Texture> makeTexture(uint32_t width, uint32_t height, gs_color_format format,
 					       const uint8_t *bytes, uint64_t generation)
 {
+	if (format == GS_UNKNOWN)
+		return nullptr;
+
 	auto texture = std::make_shared<Renderer::Texture>();
 
 	texture->texture = gs_texture_create(width, height, format, 1, &bytes, 0);
@@ -199,12 +227,14 @@ bool Renderer::upload(const FrameOutput &frame, bool keepPrevious)
 			const auto &band = frame.atlas->getBandTextureData();
 
 			if (!curve.empty() && !band.empty()) {
-				slot->curve = makeTexture(curve.width, curve.height, GS_RGBA32F, curve.bytes.data(),
-							  frame.atlasGeneration);
+				slot->curve = makeTexture(curve.width, curve.height, textureFormat(curve.format),
+							  curve.bytes.data(), frame.atlasGeneration);
 
-				// RGBA16UI uploaded as UNORM; the shader multiplies by 65535.
-				slot->band = makeTexture(band.width, band.height, GS_RGBA16, band.bytes.data(),
-							 frame.atlasGeneration);
+				// The band texture holds unsigned integers, which libobs cannot
+				// sample as such; it goes up as UNORM16 with the same bytes and
+				// the shader multiplies by 65535 to recover them.
+				slot->band = makeTexture(band.width, band.height, textureFormat(band.format),
+							 band.bytes.data(), frame.atlasGeneration);
 
 				if (!slot->curve || !slot->band)
 					slugged_log(LOG_ERROR,
@@ -308,6 +338,7 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 	gs_effect_set_vec2(param("curve_texel"), &curveTexel);
 	gs_effect_set_vec2(param("band_texel"), &bandTexel);
 	gs_effect_set_float(param("band_width"), slot.band ? float(slot.band->width) : 1.0f);
+	gs_effect_set_float(param("curve_width"), slot.curve ? float(slot.curve->width) : 1.0f);
 
 	gs_effect_set_float(param("elapsed"), params.elapsed);
 	gs_effect_set_float(param("opacity"), params.opacity);

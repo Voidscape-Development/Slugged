@@ -208,8 +208,10 @@ Settings (schema 2)  → SourceConfig snapshot             obs/settings.cpp
 
 Details worth knowing if you work on the renderer, each commented where it matters:
 
-- libobs exposes **no UINT texture format**, so slughorn's `RGBA16UI` band texture is uploaded as
-  `GS_RGBA16` (UNORM) and multiplied back by 65535 in the shader.
+- libobs exposes **no UINT texture format**, so slughorn's `RG16UI` band texture is uploaded as
+  `GS_RG16` (UNORM) and multiplied back by 65535 in the shader. `tests/test_shader.cpp` runs the
+  shader's fetch logic against a real atlas, so a slughorn packing change the shader does not
+  follow fails a test.
 - OBS's `.effect` dialect has no `asuint()`, so Slug's sign-bit root classification is expressed as
   boolean logic over three comparisons; the derivation is in `data/effects/slugged.effect`.
 - libobs's `struct vec3` is **16 bytes**, so vertex positions are emitted with a stride of four

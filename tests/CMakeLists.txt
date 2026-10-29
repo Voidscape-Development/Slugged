@@ -40,12 +40,16 @@ add_subdirectory("${SLUGGED_DEPS_DIR}/sheenbidi" sheenbidi EXCLUDE_FROM_ALL SYST
 set(SLUGHORN_FREETYPE ON CACHE BOOL "" FORCE)
 add_subdirectory("${SLUGGED_DEPS_DIR}/slughorn" slughorn EXCLUDE_FROM_ALL SYSTEM)
 
+# slughorn builds itself with -Werror; a newer compiler should not fail our tests.
+target_compile_options(slughorn PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX-,-Wno-error>)
+
 add_executable(
   slugged-tests
   main.cpp
   test_core.cpp
   test_text.cpp
   test_render.cpp
+  test_shader.cpp
   "${SLUGGED_ROOT}/src/util/log.cpp"
   "${SLUGGED_ROOT}/src/core/document.cpp"
   "${SLUGGED_ROOT}/src/core/markup.cpp"
