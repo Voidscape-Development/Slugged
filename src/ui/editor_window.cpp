@@ -853,7 +853,7 @@ QWidget *EditorWindow::buildMotionPanel()
 							{Motion::Blur, "Motion.Blur"},
 							{Motion::Spin, "Motion.Spin"},
 							{Motion::Bounce, "Motion.Bounce"}}),
-			      [this](MotionSpec &m, QComboBox *c) {
+			      [](MotionSpec &m, QComboBox *c) {
 				      m.motion = comboValue<Motion>(c);
 
 				      // A value meant for another preset is replaced by this
