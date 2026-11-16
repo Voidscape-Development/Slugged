@@ -655,9 +655,42 @@ FrameRequests collectRequests(const LayoutResult &layout)
 }
 
 GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &layout, const AtlasCache &atlas,
-				     const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out)
+				     const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out,
+				     HaloLayers *halos)
 {
 	out.clear();
+
+	if (halos)
+		halos->clear();
+
+	// Soft silhouettes, by how they blur, in the order they first appear so a
+	// glow stays under a shadow as before.
+	struct PendingHalo {
+		HaloGroup group;
+		GeometryBuffers geometry;
+	};
+
+	std::vector<PendingHalo> pendingHalos;
+
+	auto haloFor = [&](float reach, float gain, float alpha) -> GeometryBuffers & {
+		// Reaches a quarter pixel apart blur alike.
+		const float key = std::round(reach * 4.0f) / 4.0f;
+
+		for (PendingHalo &pending : pendingHalos) {
+			if (pending.group.reach == key && pending.group.gain == gain) {
+				pending.group.alphaCap = std::max(pending.group.alphaCap, alpha);
+				return pending.geometry;
+			}
+		}
+
+		PendingHalo pending;
+		pending.group.reach = key;
+		pending.group.gain = gain;
+		pending.group.alphaCap = alpha;
+		pendingHalos.push_back(std::move(pending));
+
+		return pendingHalos.back().geometry;
+	};
 
 	GeometryStats stats;
 	ShapeCache &cache = ShapeCache::instance();
@@ -735,10 +768,13 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 		// ---- glow and shadow ----------------------------------------------
 		//
 		// Both are the glyph's silhouette, drawn behind it and knocked out
-		// where the glyph sits. Their softness rides in the second colour:
-		// how far past the edge the blur reaches in pixels, and a gain, so a
-		// glow is solid at the letters' edge and fades out over its size.
+		// where the glyph sits. A soft one is a halo: drawn sharp into its
+		// group and blurred as an image (see HaloLayers). A hard one is a quad
+		// in the main geometry, knocked out by the glyph in its own shader.
 		auto silhouette = [&](float sx, float sy, const Rgba &color, float reach, float gain) {
+			const bool soft = halos && reach >= kMinHaloReach;
+			GeometryBuffers &target = soft ? haloFor(reach, gain, color.a) : shadows;
+
 			if (fillShape) {
 				QuadAttrs a = base;
 
@@ -761,10 +797,10 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				a.knockOffsetX = sx / size;
 				a.knockOffsetY = -sy / size;
 
-				const auto corners = glyphCorners(box, aaMarginEm(size, blurPixels + reach), g.x + sx,
-								  g.y + sy, size);
+				const auto corners =
+					glyphCorners(box, aaMarginEm(size, blurPixels), g.x + sx, g.y + sy, size);
 
-				emit(shadows, corners, a, nullptr);
+				emit(target, corners, a, nullptr);
 				stats.ink.add(g.x + sx + box.x0 * size - reach, g.y + sy - box.y1 * size - reach,
 					      g.x + sx + box.x1 * size + reach, g.y + sy - box.y0 * size + reach);
 			} else if (shapes.bitmap) {
@@ -777,10 +813,12 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 					a.kind = QuadKind::ImageTint;
 					a.color = color;
 
-					emit(shadows,
+					emit(target,
 					     rectCorners(x0, y0, x0 + bmp.emWidth * size, y0 + bmp.emHeight * size,
 							 slot->u0, slot->v0, slot->u1, slot->v1),
 					     a, nullptr);
+					stats.ink.add(x0 - reach, y0 - reach, x0 + bmp.emWidth * size + reach,
+						      y0 + bmp.emHeight * size + reach);
 				}
 			}
 		};
@@ -916,6 +954,16 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 	append(out, outlines);
 	append(out, fills);
 	append(out, bars);
+
+	if (halos) {
+		for (PendingHalo &pending : pendingHalos) {
+			pending.group.firstIndex = uint32_t(halos->geometry.indices.size());
+			pending.group.indexCount = uint32_t(pending.geometry.indices.size());
+
+			append(halos->geometry, pending.geometry);
+			halos->groups.push_back(pending.group);
+		}
+	}
 
 	return stats;
 }

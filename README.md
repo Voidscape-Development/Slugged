@@ -25,7 +25,7 @@ plus:
 - **Variable fonts.** The weight setting drives a variable font's weight axis; every other axis is a
   slider in the editor.
 - **Glow and soft shadows.** A glow that is solid at the letters' edge and fades out, and drop
-  shadows with a soft edge, both blurred on the GPU at any size.
+  shadows with a soft edge, both Gaussian-blurred on the GPU.
 - **Gradients**, linear or radial, with any number of colours between the ends (and presets),
   evaluated per pixel across the whole text or across each
   character.
@@ -289,8 +289,9 @@ with …** drops whatever still does not fit and ends the text in an ellipsis.
 
 **Glow** draws a soft light around the letters in its own colour, solid at their edge and gone
 *size* pixels out, and can be on together with a drop shadow. A drop shadow's **Softness** blurs
-its edge over that many pixels. Both are blurred on the GPU from the letters' outlines, so they
-stay smooth at any scale.
+its edge over that many pixels. Both are Gaussian blurs of the letters' silhouettes, so the glows of
+neighbouring letters merge smoothly, and a translucent or fading letter does not show its own glow
+through itself.
 
 A gradient runs between its two end colours through any number of **Colours between**, written as
 `#ff0080 #ffcc00@0.7` (a position from 0 to 1 after `@` is optional; colours without one are spread
@@ -381,10 +382,13 @@ Details worth knowing if you work on the renderer, each commented where it matte
 - libobs's OpenGL backend reads **one digit** after `TEXCOORD`, so `TEXCOORD10` would silently read
   `TEXCOORD1`'s data. Vertex attributes stop at `TEXCOORD9` (a `static_assert` guards it), and
   what every quad shares — the motion preset and its timing — is a uniform instead.
-- A soft shadow or glow is the coverage averaged over a disk of 32 taps, each with a narrow fade
-  of its own; fewer, softer taps leave ripples in the falloff. Widening Slug's one-pixel
-  coverage ramp (which the blur motion does) only blurs along the ray the solve weights, so on its
-  own it turns a thin stroke into a flat, hard-edged band.
+- Glows and soft shadows are **halos**, the way Spectrum's glow works: their silhouettes are drawn
+  sharp into an offscreen image (smaller for big blurs, so a blur never needs more than a few
+  taps), blurred with a separable Gaussian (`data/effects/slugged-blur.effect`), and laid behind
+  the text after the letters are cut out of them, half a pixel inside their edge so no seam shows
+  when the source is scaled up. The cost no longer depends on the letters' curves, and
+  neighbouring letters' glows merge instead of doubling where they overlap. Hard shadows stay
+  quads in the main pass.
 
 ## Licence
 

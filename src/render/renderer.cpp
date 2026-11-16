@@ -20,7 +20,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "../util/log.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <vector>
 
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
@@ -51,6 +53,15 @@ struct Renderer::Slot {
 	gs_indexbuffer_t *backgroundIndices = nullptr;
 	uint32_t backgroundCount = 0;
 
+	gs_vertbuffer_t *haloVertices = nullptr;
+	gs_indexbuffer_t *haloIndices = nullptr;
+	uint32_t haloCount = 0;
+	std::vector<HaloGroup> haloGroups;
+	float haloX0 = 0.0f;
+	float haloY0 = 0.0f;
+	float haloX1 = 0.0f;
+	float haloY1 = 0.0f;
+
 	std::shared_ptr<Texture> curve;
 	std::shared_ptr<Texture> band;
 	std::shared_ptr<Texture> image;
@@ -68,6 +79,12 @@ struct Renderer::Slot {
 
 		if (backgroundIndices)
 			gs_indexbuffer_destroy(backgroundIndices);
+
+		if (haloVertices)
+			gs_vertexbuffer_destroy(haloVertices);
+
+		if (haloIndices)
+			gs_indexbuffer_destroy(haloIndices);
 	}
 };
 
@@ -209,6 +226,19 @@ bool Renderer::loadEffect()
 	bfree(path);
 	bfree(errors);
 
+	if (char *blurPath = obs_module_file("effects/slugged-blur.effect")) {
+		char *blurErrors = nullptr;
+
+		_blurEffect = gs_effect_create_from_file(blurPath, &blurErrors);
+
+		if (!_blurEffect)
+			slugged_log(LOG_ERROR, "failed to compile slugged-blur.effect: %s",
+				    blurErrors ? blurErrors : "unknown error");
+
+		bfree(blurPath);
+		bfree(blurErrors);
+	}
+
 	return _effect != nullptr;
 }
 
@@ -254,8 +284,16 @@ bool Renderer::upload(const FrameOutput &frame, bool keepPrevious)
 	}
 
 	if (!createBuffers(frame.geometry, slot->vertices, slot->indices, slot->indexCount) ||
-	    !createBuffers(frame.background, slot->backgroundVertices, slot->backgroundIndices, slot->backgroundCount))
+	    !createBuffers(frame.background, slot->backgroundVertices, slot->backgroundIndices,
+			   slot->backgroundCount) ||
+	    !createBuffers(frame.halos.geometry, slot->haloVertices, slot->haloIndices, slot->haloCount))
 		return false;
+
+	slot->haloGroups = frame.halos.groups;
+	slot->haloX0 = frame.haloX0;
+	slot->haloY0 = frame.haloY0;
+	slot->haloX1 = frame.haloX1;
+	slot->haloY1 = frame.haloY1;
 
 	if (keepPrevious && _current && _current->indexCount > 0)
 		_outgoing = std::move(_current);
@@ -284,6 +322,14 @@ void Renderer::release()
 {
 	_current.reset();
 	_outgoing.reset();
+	_preparedSlot = nullptr;
+
+	for (gs_texrender_t **render : {&_haloLayer, &_haloA, &_haloB}) {
+		if (*render)
+			gs_texrender_destroy(*render);
+
+		*render = nullptr;
+	}
 }
 
 void Renderer::drawBackground(const DrawParams &params)
@@ -309,10 +355,23 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 	if (!_effect)
 		return;
 
-	gs_vertbuffer_t *vertices = background ? slot.backgroundVertices : slot.vertices;
-	gs_indexbuffer_t *indices = background ? slot.backgroundIndices : slot.indices;
-	const uint32_t count = background ? slot.backgroundCount : slot.indexCount;
+	if (background) {
+		drawBuffers(slot, slot.backgroundVertices, slot.backgroundIndices, 0, slot.backgroundCount, true,
+			    params, Pass::Main);
+		return;
+	}
 
+	// Glows and soft shadows go behind the text. Text cutting itself out of
+	// a picture has nothing to put behind it.
+	if (slot.haloVertices && !slot.haloGroups.empty() && !params.erase)
+		drawHalos(slot, params);
+
+	drawBuffers(slot, slot.vertices, slot.indices, 0, slot.indexCount, false, params, Pass::Main);
+}
+
+void Renderer::drawBuffers(const Slot &slot, gs_vertbuffer_t *vertices, gs_indexbuffer_t *indices, uint32_t first,
+			   uint32_t count, bool background, const DrawParams &params, Pass pass)
+{
 	if (!vertices || !indices || !count)
 		return;
 
@@ -399,10 +458,13 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 	vec2_set(&shimmer, params.shimmerX0, params.shimmerX1);
 	gs_effect_set_vec2(param("shimmer_range"), &shimmer);
 
+	gs_effect_set_float(param("halo_pass"), pass == Pass::Silhouette ? 1.0f : 0.0f);
+	gs_effect_set_float(param("erase_inset"), pass == Pass::Cutout ? 1.0f : 0.0f);
+
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
-	if (params.erase) {
+	if (params.erase || pass == Pass::Cutout) {
 		// Whatever the text covers is removed from what is already there:
 		// destination scaled by one minus the text's coverage.
 		gs_blend_function_separate(GS_BLEND_ZERO, GS_BLEND_INVSRCALPHA, GS_BLEND_ZERO, GS_BLEND_INVSRCALPHA);
@@ -426,7 +488,7 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 		gs_load_vertexbuffer(vertices);
 		gs_load_indexbuffer(indices);
 
-		gs_draw(GS_TRIS, 0, count);
+		gs_draw(GS_TRIS, first, count);
 
 		gs_technique_end_pass(tech);
 		gs_technique_end(tech);
@@ -436,6 +498,228 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 	gs_load_vertexbuffer(nullptr);
 
 	gs_set_cull_mode(previousCull);
+	gs_blend_state_pop();
+}
+
+// ---- halos ---------------------------------------------------------------------
+
+namespace {
+
+// The largest blur, in texels, run at full size. Beyond it the silhouettes are
+// drawn smaller and blurred less: a blur is soft anyway, so nothing is lost,
+// and the tap count stays the same however big the glow.
+constexpr float kMaxSigma = 6.0f;
+
+// Halo images larger than this in either direction are not drawn.
+constexpr uint32_t kMaxHaloSize = 8192;
+
+// Half-float, so a faint glow's long tail does not band.
+gs_texrender_t *ensureRender(gs_texrender_t *&render)
+{
+	if (!render)
+		render = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+
+	return render;
+}
+
+// Begins drawing into `render`, `width` by `height` texels showing the
+// source-space rectangle (left, top)-(right, bottom); cleared first, or drawn
+// over what an earlier pass this frame left there.
+bool beginRender(gs_texrender_t *render, uint32_t width, uint32_t height, float left, float top, float right,
+		 float bottom, bool clear)
+{
+	gs_texrender_reset(render);
+
+	if (!gs_texrender_begin(render, width, height))
+		return false;
+
+	if (clear) {
+		vec4 transparent;
+		vec4_zero(&transparent);
+		gs_clear(GS_CLEAR_COLOR, &transparent, 0.0f, 0);
+	}
+
+	gs_ortho(left, right, top, bottom, -100.0f, 100.0f);
+
+	return true;
+}
+
+} // namespace
+
+bool Renderer::prepareHalos(const Slot &slot, const DrawParams &params)
+{
+	if (!_blurEffect)
+		return false;
+
+	const float x0 = slot.haloX0;
+	const float y0 = slot.haloY0;
+	const float x1 = slot.haloX1;
+	const float y1 = slot.haloY1;
+
+	const uint32_t width = uint32_t(std::max(1.0f, std::ceil(x1 - x0)));
+	const uint32_t height = uint32_t(std::max(1.0f, std::ceil(y1 - y0)));
+
+	if (width > kMaxHaloSize || height > kMaxHaloSize)
+		return false;
+
+	// The silhouettes are drawn where the text is drawn, unscrolled: the
+	// layer is laid down at each scroll copy's offset afterwards.
+	DrawParams local = params;
+	local.offsetX = 0.0f;
+	local.offsetY = 0.0f;
+	local.erase = false;
+
+	gs_eparam_t *image = gs_effect_get_param_by_name(_blurEffect, "image");
+	gs_eparam_t *texelStep = gs_effect_get_param_by_name(_blurEffect, "texel_step");
+	gs_eparam_t *sigmaParam = gs_effect_get_param_by_name(_blurEffect, "sigma");
+
+	bool first = true;
+
+	for (const HaloGroup &group : slot.haloGroups) {
+		// A Gaussian that has all but faded by `reach`: about 2.5% of an
+		// edge's strength is left two sigma out, which a glow's gain of two
+		// doubles to 5%.
+		const float sigma = std::max(group.reach / 2.0f, 0.5f);
+		const float scale = std::max(1.0f, std::ceil(sigma / kMaxSigma));
+
+		const uint32_t w = uint32_t(std::max(1.0f, std::ceil(float(width) / scale)));
+		const uint32_t h = uint32_t(std::max(1.0f, std::ceil(float(height) / scale)));
+
+		// 1. The group's silhouettes, sharp.
+		gs_texrender_t *a = ensureRender(_haloA);
+
+		if (!beginRender(a, w, h, x0, y0, x0 + float(w) * scale, y0 + float(h) * scale, true))
+			continue;
+
+		drawBuffers(slot, slot.haloVertices, slot.haloIndices, group.firstIndex, group.indexCount, false, local,
+			    Pass::Silhouette);
+		gs_texrender_end(a);
+
+		// 2. Blurred across, then down, between the two scratch images.
+		auto blur = [&](gs_texrender_t *from, gs_texrender_t *&to, float dx, float dy) -> gs_texrender_t * {
+			gs_texrender_t *target = ensureRender(to);
+
+			if (!beginRender(target, w, h, 0.0f, 0.0f, float(w), float(h), false))
+				return nullptr;
+
+			gs_texture_t *texture = gs_texrender_get_texture(from);
+			vec2 step;
+			vec2_set(&step, dx / float(w), dy / float(h));
+
+			gs_effect_set_texture(image, texture);
+			gs_effect_set_vec2(texelStep, &step);
+			gs_effect_set_float(sigmaParam, sigma / scale);
+
+			gs_blend_state_push();
+			gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+			while (gs_effect_loop(_blurEffect, "Blur"))
+				gs_draw_sprite(texture, 0, w, h);
+
+			gs_blend_state_pop();
+			gs_texrender_end(target);
+
+			return target;
+		};
+
+		gs_texrender_t *across = blur(_haloA, _haloB, 1.0f, 0.0f);
+
+		if (!across)
+			continue;
+
+		gs_texrender_t *down = blur(_haloB, _haloA, 0.0f, 1.0f);
+
+		if (!down)
+			continue;
+
+		// 3. Laid into the halo layer at full size, with the group's gain.
+		gs_texrender_t *layer = ensureRender(_haloLayer);
+
+		if (!beginRender(layer, width, height, 0.0f, 0.0f, float(width), float(height), first))
+			continue;
+
+		gs_texture_t *blurred = gs_texrender_get_texture(down);
+
+		gs_effect_set_texture(image, blurred);
+		gs_effect_set_float(gs_effect_get_param_by_name(_blurEffect, "gain"), group.gain);
+		gs_effect_set_float(gs_effect_get_param_by_name(_blurEffect, "alpha_cap"),
+				    group.alphaCap * params.opacity);
+
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+		// The smaller image covers a little more than the layer when the size
+		// does not divide evenly; stretch it to what it covers.
+		while (gs_effect_loop(_blurEffect, "Composite"))
+			gs_draw_sprite(blurred, 0, uint32_t(float(w) * scale), uint32_t(float(h) * scale));
+
+		gs_blend_state_pop();
+		gs_texrender_end(layer);
+
+		first = false;
+	}
+
+	if (first)
+		return false;
+
+	// 4. The letters cut out of the halos, so a translucent or fading letter
+	// does not show its own glow through itself. Their own alpha decides how
+	// much, not the source's opacity, which the halos already carry.
+	if (!beginRender(_haloLayer, width, height, x0, y0, x0 + float(width), y0 + float(height), false))
+		return false;
+
+	DrawParams cutout = local;
+	cutout.opacity = 1.0f;
+
+	drawBuffers(slot, slot.vertices, slot.indices, 0, slot.indexCount, false, cutout, Pass::Cutout);
+	gs_texrender_end(_haloLayer);
+
+	return true;
+}
+
+void Renderer::drawHalos(const Slot &slot, const DrawParams &params)
+{
+	if (_preparedFrame != _frame || _preparedSlot != &slot) {
+		_preparedOk = prepareHalos(slot, params);
+		_preparedFrame = _frame;
+		_preparedSlot = &slot;
+	}
+
+	if (!_preparedOk || !_haloLayer)
+		return;
+
+	gs_texture_t *layer = gs_texrender_get_texture(_haloLayer);
+
+	if (!layer)
+		return;
+
+	const float x = slot.haloX0 + params.offsetX;
+	const float y = slot.haloY0 + params.offsetY;
+
+	vec2 origin;
+	vec2_set(&origin, x, y);
+
+	vec4 clip;
+
+	if (params.clip)
+		vec4_set(&clip, 0.0f, 0.0f, params.clipWidth, params.clipHeight);
+	else
+		vec4_set(&clip, -1e9f, -1e9f, 1e9f, 1e9f);
+
+	gs_effect_set_texture(gs_effect_get_param_by_name(_blurEffect, "image"), layer);
+	gs_effect_set_vec2(gs_effect_get_param_by_name(_blurEffect, "origin"), &origin);
+	gs_effect_set_vec4(gs_effect_get_param_by_name(_blurEffect, "clip_rect"), &clip);
+
+	gs_blend_state_push();
+	gs_blend_function_separate(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	gs_matrix_push();
+	gs_matrix_translate3f(x, y, 0.0f);
+
+	while (gs_effect_loop(_blurEffect, "Output"))
+		gs_draw_sprite(layer, 0, gs_texture_get_width(layer), gs_texture_get_height(layer));
+
+	gs_matrix_pop();
 	gs_blend_state_pop();
 }
 

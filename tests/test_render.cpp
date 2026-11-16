@@ -281,48 +281,84 @@ const float *effectOf(const GeometryBuffers &g, size_t vertex)
 
 } // namespace
 
-TEST(frame_glow_draws_a_soft_silhouette_behind_the_text)
+TEST(frame_glow_is_a_halo_behind_the_text)
 {
 	if (!haveFonts())
 		return;
 
-	Document plain = docWith("o");
+	Document plain = docWith("oo");
 	Document glowing = plain;
 	glowing.base.glow.enabled = true;
 	glowing.base.glow.size = 10.0f;
+	glowing.base.glow.color.a = 0.8f;
 
 	FrameState a;
 	FrameState b;
 	const FrameOutput without = build(plain, a);
 	const FrameOutput with = build(glowing, b);
 
-	CHECK_EQ(countKind(with.geometry, QuadKind::Shadow), size_t(1));
+	// The silhouettes go to one halo group, not into the main geometry.
+	CHECK_EQ(countKind(with.geometry, QuadKind::Shadow), size_t(0));
+	CHECK_EQ(with.halos.groups.size(), size_t(1));
+	CHECK_EQ(countKind(with.halos.geometry, QuadKind::Shadow), size_t(2));
 
-	// The glow's reach rides in the second colour, with a gain of two so it
-	// is solid at the letters' edge.
-	const float *color2 = &with.geometry.attributes[GeometryBuffers::Color2][0];
-	CHECK_EQ(color2[0], 10.0f);
-	CHECK_EQ(color2[1], 2.0f);
+	const HaloGroup &group = with.halos.groups[0];
+
+	CHECK_EQ(group.reach, 10.0f);
+	CHECK_EQ(group.gain, 2.0f);
+	CHECK_EQ(group.alphaCap, 0.8f);
+	CHECK_EQ(group.indexCount, 12u);
+
+	// The halo image covers the glyphs and the glow's reach.
+	CHECK(with.haloX0 <= 0.0f && with.haloY0 <= 0.0f);
+	CHECK(with.haloX1 >= float(with.width) && with.haloY1 >= float(with.height));
 
 	// An auto-sized source grows to hold the glow (the line box already held
-	// part of it, beside the letter's ink).
+	// part of it, beside the letters' ink).
 	CHECK(with.width >= without.width + 10);
 }
 
-TEST(frame_soft_shadow_carries_its_blur)
+TEST(frame_halos_group_by_blur)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("abc");
+	doc.base.glow.enabled = true;
+	doc.base.glow.size = 12.0f;
+	doc.base.shadow.enabled = true;
+	doc.base.shadow.blur = 6.0f;
+
+	StyleOverride bigger;
+	bigger.glowSize = 30.0f;
+	doc.applyStyle(2, 3, bigger);
+
+	FrameState state;
+	const FrameOutput frame = build(doc, state);
+
+	// Glow 12, shadow 6 and glow 30: three blurs, the glow first so it stays
+	// under the shadow.
+	CHECK_EQ(frame.halos.groups.size(), size_t(3));
+	CHECK_EQ(frame.halos.groups[0].reach, 12.0f);
+	CHECK_EQ(frame.halos.groups[0].gain, 2.0f);
+	CHECK_EQ(frame.halos.groups[1].reach, 6.0f);
+	CHECK_EQ(frame.halos.groups[1].gain, 1.0f);
+	CHECK_EQ(frame.halos.groups[2].reach, 30.0f);
+}
+
+TEST(frame_hard_shadow_stays_in_the_main_geometry)
 {
 	if (!haveFonts())
 		return;
 
 	Document doc = docWith("o");
 	doc.base.shadow.enabled = true;
-	doc.base.shadow.blur = 6.0f;
 
 	FrameState state;
 	const FrameOutput frame = build(doc, state);
 
-	CHECK_EQ(frame.geometry.attributes[GeometryBuffers::Color2][0], 6.0f);
-	CHECK_EQ(frame.geometry.attributes[GeometryBuffers::Color2][1], 1.0f);
+	CHECK_EQ(countKind(frame.geometry, QuadKind::Shadow), size_t(1));
+	CHECK(frame.halos.empty());
 }
 
 TEST(frame_gradient_with_stops_uses_a_ramp)

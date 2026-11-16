@@ -86,6 +86,10 @@ public:
 
 	bool loadEffect();
 
+	// Marks the start of a source's render, so halos are prepared once per
+	// frame however many scroll copies draw them.
+	void beginFrame() { _frame++; }
+
 	// Uploads a frame. With `keepPrevious`, the frame being replaced stays
 	// available to drawOutgoing() until releaseOutgoing().
 	bool upload(const FrameOutput &frame, bool keepPrevious);
@@ -104,9 +108,34 @@ public:
 	struct Slot;
 
 private:
+	// What a draw of the glyph quads is for.
+	enum class Pass {
+		Main,       // the text itself
+		Silhouette, // glow and soft-shadow silhouettes, sharp, offscreen
+		Cutout,     // the letters cut out of the blurred halos
+	};
+
 	void drawSlot(const Slot &slot, bool background, const DrawParams &params);
+	void drawBuffers(const Slot &slot, gs_vertbuffer_t *vertices, gs_indexbuffer_t *indices, uint32_t first,
+			 uint32_t count, bool background, const DrawParams &params, Pass pass);
+
+	// Blurs `slot`'s halo groups into the halo layer (once per frame) and
+	// draws the layer at the params' scroll offset.
+	void drawHalos(const Slot &slot, const DrawParams &params);
+	bool prepareHalos(const Slot &slot, const DrawParams &params);
 
 	gs_effect_t *_effect = nullptr;
+	gs_effect_t *_blurEffect = nullptr;
+
+	// The halo layer, and two scratch images each group is blurred between.
+	gs_texrender_t *_haloLayer = nullptr;
+	gs_texrender_t *_haloA = nullptr;
+	gs_texrender_t *_haloB = nullptr;
+
+	uint64_t _frame = 0;
+	uint64_t _preparedFrame = 0;
+	const Slot *_preparedSlot = nullptr;
+	bool _preparedOk = false;
 
 	std::unique_ptr<Slot> _current;
 	std::unique_ptr<Slot> _outgoing;

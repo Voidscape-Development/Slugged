@@ -202,7 +202,7 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 	state.images.ensure(requests.images);
 
 	const GeometryStats stats =
-		GeometryBuilder::build(doc, layout, state.atlas, state.images, input.params, out.geometry);
+		GeometryBuilder::build(doc, layout, state.atlas, state.images, input.params, out.geometry, &out.halos);
 
 	out.units = stats.units;
 	out.changedUnits = stats.changedUnits;
@@ -217,6 +217,7 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 
 	if (fixed) {
 		out.geometry.translate(padding, padding);
+		out.halos.geometry.translate(padding, padding);
 
 		out.width = uint32_t(std::max(1.0f, std::round(boxWidth)));
 		out.height = uint32_t(std::max(1.0f, std::round(boxHeight)));
@@ -233,6 +234,7 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 		const float dy = padding - std::min(0.0f, extent.y0);
 
 		out.geometry.translate(dx, dy);
+		out.halos.geometry.translate(dx, dy);
 
 		editX = dx;
 		editY = dy;
@@ -254,6 +256,44 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 			EditMap::build(layout, input.tokenSpans, editX, editY, input.writtenSize));
 
 	GeometryBuilder::buildBackground(doc.background, float(out.width), float(out.height), out.background);
+
+	if (!out.halos.empty()) {
+		// The halos' image covers their silhouettes and the blur's reach,
+		// with room for the letters to move: motion slides them, bounces
+		// them and spins them, and effects shake them, all in the vertex
+		// shader, after this rectangle is fixed.
+		InkBounds bounds;
+		const auto &positions = out.halos.geometry.positions;
+
+		for (size_t i = 0; i + 1 < positions.size(); i += 4)
+			bounds.add(positions[i], positions[i + 1], positions[i], positions[i + 1]);
+
+		float reach = 0.0f;
+
+		for (const HaloGroup &group : out.halos.groups)
+			reach = std::max(reach, group.reach);
+
+		const float span = std::max(bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+		float room = reach + std::max(24.0f, span * 0.1f);
+
+		switch (doc.motion.motion) {
+		case Motion::Slide:
+		case Motion::Bounce:
+		case Motion::Wave:
+			room += std::fabs(doc.motion.param);
+			break;
+		case Motion::Spin:
+			room += span * 0.5f;
+			break;
+		default:
+			break;
+		}
+
+		out.haloX0 = std::floor(bounds.x0 - room);
+		out.haloY0 = std::floor(bounds.y0 - room);
+		out.haloX1 = std::ceil(bounds.x1 + room);
+		out.haloY1 = std::ceil(bounds.y1 + room);
+	}
 
 	out.atlas = state.atlas.shared();
 	out.atlasGeneration = state.atlas.generation();

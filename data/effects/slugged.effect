@@ -47,9 +47,11 @@
  * The motion preset and its timing are the same for every quad, so they are
  * uniforms (motion_*); a quad only carries where it falls in the stagger.
  *
- * For a shadow (or glow) quad, TEXCOORD6 carries its softness instead of a
- * colour: how far past the letters' edge it reaches, in pixels, and a gain
- * applied to the coverage, so a glow can be solid at the edge and fade out.
+ * Glows and soft shadows are not blurred here: their silhouettes are drawn
+ * sharp into an offscreen image (halo_pass), blurred there by
+ * slugged-blur.effect, and laid behind the text after the letters are cut out
+ * of them (erase_inset). Only hard shadows draw as shadow quads in the main
+ * pass.
  *
  * For a gradient drawn from a ramp in the image atlas (types 3 and 4: one with
  * stops between its ends), TEXCOORD6 carries the ramp's u at either end and its
@@ -134,8 +136,14 @@ uniform float fill_all_source;
 /* Horizontal extent of the text, which a shimmer sweeps across. */
 uniform float2 shimmer_range;
 
-/* Taps in the soft silhouette's disk blur. */
-#define SOFT_TAPS 32
+/* 1 while drawing glow and soft-shadow silhouettes offscreen to be blurred:
+ * sharp coverage in their own colour, no knock-out. */
+uniform float halo_pass;
+
+/* 1 while cutting the letters out of the blurred halos: only letters and
+ * outlines draw, and only half a pixel inside their edge, so the halo meets
+ * the letter without a dark seam when the source is scaled up. */
+uniform float erase_inset;
 
 sampler_state point_clamp {
 	Filter    = Point;
@@ -710,49 +718,20 @@ float4 PSSlug(VertOut f) : TARGET
 
 		coverage = ring * (1.0 - inFront);
 	} else if (kind < KIND_SHADOW + 0.5) {
-		float2 glyph = em + f.grad.zw;
-		float reach = f.endColor.x;
+		float shadowCoverage = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
 
-		float shadowCoverage = 0.0;
-
-		if (reach < 1.5) {
-			shadowCoverage = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
+		if (halo_pass > 0.5) {
+			/* A soft silhouette, drawn sharp for the blur that follows; the
+			 * glyph cuts it out after blurring (see erase_inset). */
+			coverage = shadowCoverage;
 		} else {
-			/*
-			 * A soft silhouette is the shape blurred over a disk. Widening the
-			 * coverage ramp alone (as the blur motion does) blurs only along
-			 * whichever ray the solve weights, so a thin stroke turns into a
-			 * flat, hard-edged band; instead the coverage is averaged over taps
-			 * spread evenly across a disk (a Vogel spiral), each with a soft
-			 * edge of its own that hides the gaps between them. Three quarters
-			 * of the reach is the disk and the rest the taps' own fade.
-			 *
-			 * The taps must be many and their own fade narrow: with a dozen
-			 * taps each fading over the whole disk, the copies' outlines show
-			 * through as ripples in the falloff. Rotating the spiral per pixel
-			 * instead trades the ripples for visible grain.
-			 */
-			float radius = reach * 0.75;
-			float2 emRadius = radius * emsPerPixel;
-			float2 soft = pixelsPerEm / max(max(blur, radius * 0.45), 1.0);
+			/* A hard shadow, knocked out where the glyph in front of it sits. */
+			float2 glyph = em + f.grad.zw;
+			float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
+					    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
 
-			for (int i = 0; i < SOFT_TAPS; i++) {
-				float r = sqrt((float(i) + 0.5) / float(SOFT_TAPS));
-				float a = float(i) * 2.3999632;
-				float2 at = em + float2(cos(a), sin(a)) * r * emRadius;
-
-				shadowCoverage += max(slug_Render(at, soft, f.aBand, f.aShape),
-						      slug_Optional(at, soft, f.bBand, f.bShape));
-			}
-
-			shadowCoverage /= float(SOFT_TAPS);
+			coverage = shadowCoverage * (1.0 - inFront);
 		}
-
-		/* The glyph that knocks the silhouette out keeps its own sharp edge. */
-		float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
-				    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
-
-		coverage = saturate(shadowCoverage * max(f.endColor.y, 1e-3)) * (1.0 - inFront);
 	} else if (kind < KIND_SOLID + 0.5) {
 		coverage = 1.0;
 	} else if (kind < KIND_IMAGE + 0.5) {
@@ -770,6 +749,14 @@ float4 PSSlug(VertOut f) : TARGET
 		float aa = max(max(emsPerPixel.x, emsPerPixel.y), 1e-4);
 
 		coverage = clamp(0.5 - d / aa, 0.0, 1.0);
+	}
+
+	if (erase_inset > 0.5) {
+		/* Hard shadows are behind the halos, not in front of them. */
+		if (abs(kind - KIND_SHADOW) < 0.5 || abs(kind - KIND_IMAGE_TINT) < 0.5)
+			return float4(0.0, 0.0, 0.0, 0.0);
+
+		coverage = saturate(coverage * 2.0 - 1.0);
 	}
 
 	return float4(color.rgb, coverage * color.a * fade * opacity);

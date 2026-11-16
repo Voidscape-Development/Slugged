@@ -56,6 +56,15 @@ struct FrameOutput {
 	GeometryBuffers geometry;
 	GeometryBuffers background;
 
+	// Glows and soft shadows, blurred offscreen, and the source-space rectangle
+	// (x0, y0, x1, y1) their image covers: their reach, plus room for motion
+	// and effects to move the letters about.
+	HaloLayers halos;
+	float haloX0 = 0.0f;
+	float haloY0 = 0.0f;
+	float haloX1 = 0.0f;
+	float haloY1 = 0.0f;
+
 	std::shared_ptr<const slughorn::Atlas> atlas;
 	uint64_t atlasGeneration = 0;
 

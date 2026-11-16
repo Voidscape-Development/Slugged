@@ -1,0 +1,148 @@
+/*
+ * slugged-blur.effect -- the passes that turn glow and soft-shadow silhouettes
+ * into halos behind the text (render/renderer.cpp drives them):
+ *
+ *   Blur       one direction of a separable Gaussian, on a premultiplied
+ *              image. Run across and then down.
+ *   Composite  a blurred group laid into the halo layer, with its gain: a glow
+ *              is solid at the letters' edge, where a plain blur is half
+ *              strength.
+ *   Output     the finished halo layer drawn behind the text, clipped to the
+ *              source's box when the source clips.
+ *
+ * The same approach as Spectrum's glow: blur the image once rather than solve
+ * coverage many times per pixel, so the cost no longer depends on the
+ * letters' curves, and neighbouring letters' halos merge instead of doubling
+ * up where they overlap. Large blurs run on a smaller image (the renderer
+ * draws the silhouettes at reduced size), which keeps sigma, and so the tap
+ * count, small whatever the glow's size.
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+/* One texel in the direction of this pass, in texture coordinates. */
+uniform float2 texel_step;
+
+/* The Gaussian's standard deviation, in texels of this image. */
+uniform float sigma;
+
+/* Coverage multiplier, and the alpha it may not push the colour past. */
+uniform float gain;
+uniform float alpha_cap;
+
+/* Output: where the image's top-left corner is in source space, and the
+ * source-space rectangle (x0, y0, x1, y1) outside which nothing draws. */
+uniform float2 origin;
+uniform float4 clip_rect;
+
+/* Outside the image is transparent, not its edge texel repeated. */
+sampler_state border_sampler {
+	Filter    = Linear;
+	AddressU  = Border;
+	AddressV  = Border;
+	BorderColor = 00000000;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+struct VertOut {
+	float4 pos   : POSITION;
+	float2 uv    : TEXCOORD0;
+	float2 local : TEXCOORD1;
+};
+
+VertOut VSDefault(VertData v)
+{
+	VertOut o;
+
+	o.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+	o.uv = v.uv;
+	o.local = v.pos.xy;
+
+	return o;
+}
+
+/* Taps either side of the centre, each pair of texels read with one bilinear
+ * fetch between them. 3 sigma covers the Gaussian; the renderer keeps sigma
+ * at 6 texels or less, so 9 pairs suffice. */
+#define BLUR_PAIRS 10
+
+float4 PSBlur(VertOut f) : TARGET
+{
+	float s = max(sigma, 0.01);
+	float reach = ceil(3.0 * s);
+	float twoSigma2 = 2.0 * s * s;
+
+	float4 sum = image.Sample(border_sampler, f.uv);
+	float total = 1.0;
+
+	for (int i = 0; i < BLUR_PAIRS; i++) {
+		float x = float(i) * 2.0 + 1.0;
+
+		if (x > reach)
+			break;
+
+		float w1 = exp(-(x * x) / twoSigma2);
+		float w2 = exp(-((x + 1.0) * (x + 1.0)) / twoSigma2);
+		float w = w1 + w2;
+		float offset = (x * w1 + (x + 1.0) * w2) / w;
+
+		sum += (image.Sample(border_sampler, f.uv + texel_step * offset) +
+			image.Sample(border_sampler, f.uv - texel_step * offset)) * w;
+		total += 2.0 * w;
+	}
+
+	return sum / total;
+}
+
+float4 PSComposite(VertOut f) : TARGET
+{
+	float4 c = image.Sample(border_sampler, f.uv) * gain;
+
+	/* Premultiplied, so scaling colour and alpha together keeps the hue. */
+	if (c.a > alpha_cap)
+		c *= alpha_cap / c.a;
+
+	return c;
+}
+
+float4 PSOutput(VertOut f) : TARGET
+{
+	float2 at = origin + f.local;
+
+	if (at.x < clip_rect.x || at.y < clip_rect.y || at.x > clip_rect.z || at.y > clip_rect.w)
+		return float4(0.0, 0.0, 0.0, 0.0);
+
+	return image.Sample(border_sampler, f.uv);
+}
+
+technique Blur
+{
+	pass
+	{
+		vertex_shader = VSDefault(v);
+		pixel_shader  = PSBlur(f);
+	}
+}
+
+technique Composite
+{
+	pass
+	{
+		vertex_shader = VSDefault(v);
+		pixel_shader  = PSComposite(f);
+	}
+}
+
+technique Output
+{
+	pass
+	{
+		vertex_shader = VSDefault(v);
+		pixel_shader  = PSOutput(f);
+	}
+}

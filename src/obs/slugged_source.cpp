@@ -1266,6 +1266,7 @@ void renderText(SluggedSource *ctx, const Renderer::DrawParams *extra = nullptr)
 	if (!ctx->renderer.loadEffect())
 		return;
 
+	ctx->renderer.beginFrame();
 	uploadPending(ctx);
 
 	if (ctx->releaseOutgoing) {
