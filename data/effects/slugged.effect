@@ -22,13 +22,15 @@
  * outside all flow control: derivatives inside a branch are undefined in HLSL,
  * and several of the paths below evaluate the coverage solve conditionally.
  *
- * Vertex attributes (render/geometry.hpp fills these):
+ * Vertex attributes (render/geometry.hpp fills these). libobs's OpenGL backend
+ * reads one digit after TEXCOORD, so only TEXCOORD0-9 exist:
  *
  *   POSITION   .xy source-space corner; .w forced to 1 in the vertex shader
  *   TEXCOORD0  em.xy, code, knock-out alpha of shape A
  *              em is the glyph-space coordinate for glyph quads, the texture
  *              coordinate for bitmaps, and the pixel offset from the centre for
- *              the background. code = kind + 8 * gradient type.
+ *              the background. code = kind + 8 * gradient type
+ *              + 64 * (knock-out alpha of shape B, as 0..255).
  *   TEXCOORD1  shape A band transform      (the fill)
  *   TEXCOORD2  shape A band location/limits
  *   TEXCOORD3  shape B band transform      (the outline ring; zero when absent)
@@ -37,16 +39,17 @@
  *              corner radius, unused) instead.
  *   TEXCOORD5  colour, straight alpha (gradient start)
  *   TEXCOORD6  gradient end colour
- *   TEXCOORD7  motion: preset, amount, start time (whole text), duration
- *   TEXCOORD8  pivot.xy, stagger index, start time (changed text only; < 0 for
+ *   TEXCOORD7  pivot.xy, stagger index, start time (changed text only; < 0 for
  *              a character that did not change)
- *   TEXCOORD9  direction.xy, radians per second, knock-out alpha of shape B
- *   TEXCOORD10 gradient u, v; em offset from a shadow to the glyph casting it
- *   TEXCOORD11 effect: kind + 16 * seed, amount, radians per second, phase
+ *   TEXCOORD8  gradient u, v; em offset from a shadow to the glyph casting it
+ *   TEXCOORD9  effect: kind + 16 * seed, amount, radians per second, phase
+ *
+ * The motion preset and its timing are the same for every quad, so they are
+ * uniforms (motion_*); a quad only carries where it falls in the stagger.
  *
  * For a shadow (or glow) quad, TEXCOORD6 carries its softness instead of a
- * colour: the width of the edge's fade in pixels, and a gain applied to the
- * coverage, so a glow can be solid at the letters' edge and fade outward.
+ * colour: how far past the letters' edge it reaches, in pixels, and a gain
+ * applied to the coverage, so a glow can be solid at the edge and fade out.
  *
  * For a gradient drawn from a ramp in the image atlas (types 3 and 4: one with
  * stops between its ends), TEXCOORD6 carries the ramp's u at either end and its
@@ -105,6 +108,15 @@ uniform float2 scroll_offset;
 /* Source-space rectangle outside which nothing draws: x0, y0, x1, y1. */
 uniform float4 clip_rect;
 
+/* The motion preset (MOTION_*), its amount, one unit's duration, the delay
+ * between units, its direction (y-down) and, for wave, radians per second. */
+uniform float motion_mode;
+uniform float motion_param;
+uniform float motion_duration;
+uniform float motion_stagger;
+uniform float2 motion_dir;
+uniform float motion_omega;
+
 /* Seconds on the effects' clock, which never resets on a replay. */
 uniform float loop_time;
 
@@ -121,6 +133,9 @@ uniform float fill_all_source;
 
 /* Horizontal extent of the text, which a shimmer sweeps across. */
 uniform float2 shimmer_range;
+
+/* Taps in the soft silhouette's disk blur. */
+#define SOFT_TAPS 12
 
 sampler_state point_clamp {
 	Filter    = Point;
@@ -158,11 +173,9 @@ struct VertIn {
 	float4 bShape    : TEXCOORD4;
 	float4 color     : TEXCOORD5;
 	float4 endColor  : TEXCOORD6;
-	float4 fx        : TEXCOORD7;
-	float4 pivot     : TEXCOORD8;
-	float4 motion    : TEXCOORD9;
-	float4 grad      : TEXCOORD10;
-	float4 effect    : TEXCOORD11;
+	float4 pivot     : TEXCOORD7;
+	float4 grad      : TEXCOORD8;
+	float4 effect    : TEXCOORD9;
 };
 
 struct VertOut {
@@ -446,17 +459,25 @@ VertOut VSSlug(VertIn v)
 	VertOut o;
 
 	float4 pos   = v.pos;
-	float  mode  = v.fx.x;
-	float  param = v.fx.y;
-	float  dur   = max(v.fx.w, 1e-4);
+	float  mode  = motion_mode;
+	float  param = motion_param;
+	float  dur   = max(motion_duration, 1e-4);
 
-	float2 dir   = v.motion.xy;
-	float  omega = v.motion.z;
+	float2 dir   = motion_dir;
+	float  omega = motion_omega;
+
+	/* Shape B's knock-out alpha rides in the code's high bits. */
+	float codeHigh = floor(v.em.z / 64.0 + 0.001);
+	float code = v.em.z - codeHigh * 64.0;
+	float knockB = codeHigh / 255.0;
+
+	/* When the whole text plays, each unit starts after the ones before it. */
+	float startAll = v.pivot.z * motion_stagger;
 
 	/* A text-change replay animates only the characters that changed; the
 	 * rest hold their final state. */
 	bool onlyChanged = scope_changed > 0.5;
-	float start = onlyChanged ? v.pivot.w : v.fx.z;
+	float start = onlyChanged ? v.pivot.w : startAll;
 	bool settled = onlyChanged && v.pivot.w < 0.0;
 
 	float phase = settled ? 1.0 : clamp((elapsed - start) / dur, 0.0, 1.0);
@@ -490,7 +511,7 @@ VertOut VSSlug(VertIn v)
 	} else if (mode < 5.5) {
 		/* MOTION_WAVE: never settles; spread along the text by the same
 		 * stagger that delays the one-shot presets. */
-		pos.xy += dir * (sin((elapsed - v.fx.z) * omega) * param);
+		pos.xy += dir * (sin((elapsed - startAll) * omega) * param);
 		fade = 1.0;
 	} else if (mode < 6.5) {
 		/* MOTION_BLUR: resolves out of a blur `param` pixels wide. */
@@ -575,8 +596,8 @@ VertOut VSSlug(VertIn v)
 	o.color     = v.color;
 	o.endColor    = v.endColor;
 	o.grad      = v.grad;
-	o.misc      = float4(fade, blur, v.em.z, v.em.w);
-	o.knock     = float4(v.motion.w, unscrolled, 0.0);
+	o.misc      = float4(fade, blur, code, v.em.w);
+	o.knock     = float4(knockB, unscrolled, 0.0);
 	o.fxv       = float4(effectKind, effectAmount, effectAngle, glitchTint);
 
 	return o;
@@ -690,12 +711,39 @@ float4 PSSlug(VertOut f) : TARGET
 		coverage = ring * (1.0 - inFront);
 	} else if (kind < KIND_SHADOW + 0.5) {
 		float2 glyph = em + f.grad.zw;
+		float reach = f.endColor.x;
 
-		/* The silhouette's edge fades over endColor.x pixels; the glyph that
-		 * knocks it out keeps its own sharp edge. */
-		float2 soft = pixelsPerEm / max(max(blur, f.endColor.x), 1.0);
+		float shadowCoverage = 0.0;
 
-		float shadowCoverage = max(slug_Render(em, soft, f.aBand, f.aShape), slug_Optional(em, soft, f.bBand, f.bShape));
+		if (reach < 1.5) {
+			shadowCoverage = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
+		} else {
+			/*
+			 * A soft silhouette is the shape blurred over a disk. Widening the
+			 * coverage ramp alone (as the blur motion does) blurs only along
+			 * whichever ray the solve weights, so a thin stroke turns into a
+			 * flat, hard-edged band; instead the coverage is averaged over taps
+			 * spread evenly across a disk (a Vogel spiral), each with a soft
+			 * edge of its own that hides the gaps between them. Two thirds of
+			 * the reach is the disk and the rest the taps' own fade.
+			 */
+			float radius = reach * (2.0 / 3.0);
+			float2 emRadius = radius * emsPerPixel;
+			float2 soft = pixelsPerEm / max(max(blur, radius), 1.0);
+
+			for (int i = 0; i < SOFT_TAPS; i++) {
+				float r = sqrt((float(i) + 0.5) / float(SOFT_TAPS));
+				float a = float(i) * 2.3999632;
+				float2 at = em + float2(cos(a), sin(a)) * r * emRadius;
+
+				shadowCoverage += max(slug_Render(at, soft, f.aBand, f.aShape),
+						      slug_Optional(at, soft, f.bBand, f.bShape));
+			}
+
+			shadowCoverage /= float(SOFT_TAPS);
+		}
+
+		/* The glyph that knocks the silhouette out keeps its own sharp edge. */
 		float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
 				    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
 

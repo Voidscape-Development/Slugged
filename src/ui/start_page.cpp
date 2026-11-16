@@ -20,6 +20,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "widgets.hpp"
 #include "../obs/start_points.hpp"
 
+#include <cmath>
+
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -168,6 +170,74 @@ QPixmap preview(const QString &id, const QFont &base, QSize size, qreal ratio)
 		p.drawText(chip, Qt::AlignCenter, name);
 
 		centred(tr_("Start.File.Sample"), sized(base, 15), light, 16);
+	} else if (id == "counter") {
+		const QFont font = sized(base, 24);
+		const QString lead = tr_("Start.Counter.Line1") + " ";
+		const QString value = QStringLiteral("17");
+		const QFontMetricsF metrics(font);
+		const qreal leadWidth = metrics.horizontalAdvance(lead);
+		const qreal x = (area.width() - leadWidth - metrics.horizontalAdvance(value)) / 2.0;
+
+		p.setFont(font);
+		p.setPen(light);
+		p.drawText(QRectF(x, 0, leadWidth + 2, area.height()), Qt::AlignVCenter | Qt::AlignLeft, lead);
+		p.setPen(accent);
+		p.drawText(QRectF(x + leadWidth, 0, 80, area.height()), Qt::AlignVCenter | Qt::AlignLeft, value);
+
+		// The hotkeys that step it.
+		const QFont keys = sized(base, 10, QFont::DemiBold);
+		p.setFont(keys);
+
+		const QStringList labels = {QStringLiteral("−"), QStringLiteral("+")};
+
+		for (int i = 0; i < 2; i++) {
+			const QRectF key(area.width() - 58 + i * 26, area.height() - 26, 20, 18);
+
+			p.setPen(QPen(ui::color::strongBorder, 1.0));
+			p.setBrush(Qt::NoBrush);
+			p.drawRoundedRect(key, 4, 4);
+			p.setPen(muted);
+			p.drawText(key, Qt::AlignCenter, labels[i]);
+		}
+	} else if (id == "messages") {
+		const QRectF plate(area.width() * 0.12, area.center().y() - 20, area.width() * 0.76, 40);
+
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(0x2a, 0x2c, 0x34));
+		p.drawRoundedRect(plate, 8, 8);
+
+		p.setFont(sized(base, 15, QFont::DemiBold));
+		p.setPen(light);
+		p.drawText(plate, Qt::AlignCenter, tr_("Start.Messages.Line1"));
+
+		// Dots for the lines taking turns.
+		p.setPen(Qt::NoPen);
+
+		for (int i = 0; i < 3; i++) {
+			p.setBrush(i == 0 ? accent : muted);
+			p.drawEllipse(QPointF(area.center().x() - 12 + i * 12, plate.bottom() + 14), 3, 3);
+		}
+	} else if (id == "neon") {
+		const QFont font = sized(base, 34, QFont::Black);
+		const QColor pink(0xff, 0x2e, 0x9e);
+
+		p.setFont(font);
+
+		// A cheap glow: the word drawn faintly at offsets around itself.
+		for (int ring = 3; ring >= 1; ring--) {
+			QColor halo = pink;
+			halo.setAlphaF(0.12 * (4 - ring));
+			p.setPen(halo);
+
+			for (int a = 0; a < 12; a++) {
+				const qreal angle = a * 3.14159265 / 6.0;
+				p.drawText(area.translated(std::cos(angle) * ring * 2.0, std::sin(angle) * ring * 2.0),
+					   Qt::AlignCenter, tr_("Start.Neon.Line1"));
+			}
+		}
+
+		p.setPen(QColor(0xff, 0xee, 0xfa));
+		p.drawText(area, Qt::AlignCenter, tr_("Start.Neon.Line1"));
 	}
 
 	return pixmap;

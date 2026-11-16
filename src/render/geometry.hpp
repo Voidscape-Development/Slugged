@@ -35,23 +35,25 @@ namespace slugged {
 // because libobs's struct vec3 is 16 bytes wide.
 //
 // The attribute layout is documented in data/effects/slugged.effect; the order
-// below is the TEXCOORD index of each attribute.
+// below is the TEXCOORD index of each attribute. There must be no more than
+// ten: libobs's OpenGL backend reads a single digit after TEXCOORD, so
+// TEXCOORD10 would silently read TEXCOORD1's data.
 struct GeometryBuffers {
 	enum Attribute {
-		Em,        // em.xy, code (kind + 8 * gradient type), shape A's knock-out alpha
-		ABand,     // shape A: band transform
-		AShape,    // shape A: band location and limits
-		BBand,     // shape B (the outline ring): band transform
-		BShape,    // shape B: band location and limits
-		Color,     // colour, or gradient start
-		Color2,    // gradient end
-		Motion,    // preset, amount, start (all), duration
-		Pivot,     // pivot.xy, stagger index, start (changed characters only)
-		Direction, // direction.xy, radians per second, shape B's knock-out alpha
-		Gradient,  // gradient u, v; shadow-to-glyph offset in em
-		Effect,    // effect kind + 16 * seed, amount, radians per second, phase
+		Em,       // em.xy, code (kind + 8 * gradient type + 64 * B's knock-out), shape A's knock-out alpha
+		ABand,    // shape A: band transform
+		AShape,   // shape A: band location and limits
+		BBand,    // shape B (the outline ring): band transform
+		BShape,   // shape B: band location and limits
+		Color,    // colour, or gradient start
+		Color2,   // gradient end
+		Pivot,    // pivot.xy, stagger index, start (changed characters only)
+		Gradient, // gradient u, v; shadow-to-glyph offset in em
+		Effect,   // effect kind + 16 * seed, amount, radians per second, phase
 		AttributeCount,
 	};
+
+	static_assert(AttributeCount <= 10, "libobs-opengl cannot address TEXCOORD10 and above");
 
 	std::vector<float> positions;
 	std::array<std::vector<float>, AttributeCount> attributes;

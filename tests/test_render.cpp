@@ -298,10 +298,10 @@ TEST(frame_glow_draws_a_soft_silhouette_behind_the_text)
 
 	CHECK_EQ(countKind(with.geometry, QuadKind::Shadow), size_t(1));
 
-	// The glow's fade width rides in the second colour: twice its size, with
-	// a gain of two so it is solid at the letters' edge.
+	// The glow's reach rides in the second colour, with a gain of two so it
+	// is solid at the letters' edge.
 	const float *color2 = &with.geometry.attributes[GeometryBuffers::Color2][0];
-	CHECK_EQ(color2[0], 20.0f);
+	CHECK_EQ(color2[0], 10.0f);
 	CHECK_EQ(color2[1], 2.0f);
 
 	// An auto-sized source grows to hold the glow (the line box already held

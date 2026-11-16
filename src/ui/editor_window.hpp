@@ -135,6 +135,7 @@ private:
 
 	void rebuildAxisControls();
 	void populateFamilies();
+	void populateFillSources();
 
 	// ---- state to screen ----
 
@@ -285,6 +286,10 @@ private:
 	QDoubleSpinBox *_gradientAngle = nullptr;
 	QWidget *_gradientAngleRow = nullptr;
 	QComboBox *_gradientSpan = nullptr;
+	QLineEdit *_gradientStops = nullptr;
+	QComboBox *_gradientPresets = nullptr;
+	QWidget *_fillSourceBox = nullptr;
+	QComboBox *_fillSourceList = nullptr;
 	QLabel *_differsLegend = nullptr;
 
 	ui::Switch *_outlineEnabled = nullptr;
@@ -298,6 +303,18 @@ private:
 	QDoubleSpinBox *_shadowX = nullptr;
 	QDoubleSpinBox *_shadowY = nullptr;
 	ColorButton *_shadowColor = nullptr;
+	QDoubleSpinBox *_shadowBlur = nullptr;
+
+	ui::Switch *_glowEnabled = nullptr;
+	QWidget *_glowBox = nullptr;
+	ColorButton *_glowColor = nullptr;
+	QDoubleSpinBox *_glowSize = nullptr;
+
+	QComboBox *_effectKind = nullptr;
+	QWidget *_effectBox = nullptr;
+	QDoubleSpinBox *_effectStrength = nullptr;
+	QDoubleSpinBox *_effectSpeed = nullptr;
+	QDoubleSpinBox *_effectSpread = nullptr;
 
 	ui::Switch *_background = nullptr;
 	QWidget *_backgroundBox = nullptr;
@@ -313,6 +330,10 @@ private:
 	QSpinBox *_boxHeight = nullptr;
 	QComboBox *_wrap = nullptr;
 	ui::Segmented *_valign = nullptr;
+	QCheckBox *_fitShrink = nullptr;
+	QSpinBox *_fitMin = nullptr;
+	QWidget *_fitMinRow = nullptr;
+	QCheckBox *_fitEllipsis = nullptr;
 	QDoubleSpinBox *_lineHeight = nullptr;
 
 	std::map<int, QPushButton *> _motionTiles;
@@ -340,6 +361,15 @@ private:
 	QWidget *_motionParamRow = nullptr;
 	QDoubleSpinBox *_motionSpeed = nullptr;
 	QWidget *_motionSpeedRow = nullptr;
+
+	QCheckBox *_countUp = nullptr;
+	QDoubleSpinBox *_countDuration = nullptr;
+	QWidget *_countDurationRow = nullptr;
+
+	ui::Switch *_rotateEnabled = nullptr;
+	QWidget *_rotateBox = nullptr;
+	QDoubleSpinBox *_rotateInterval = nullptr;
+	QCheckBox *_rotateShuffle = nullptr;
 
 	ui::Switch *_scrollEnabled = nullptr;
 	QWidget *_scrollBox = nullptr;
@@ -371,6 +401,12 @@ private:
 	QSpinBox *_chatlogLines = nullptr;
 	QCheckBox *_markupBox = nullptr;
 	QLineEdit *_variablesFile = nullptr;
+
+	QLineEdit *_counterVariable = nullptr;
+	QDoubleSpinBox *_counterStep = nullptr;
+
+	QWidget *_filterModeBox = nullptr;
+	QComboBox *_filterMode = nullptr;
 };
 
 } // namespace slugged

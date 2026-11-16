@@ -71,8 +71,9 @@ LayoutResult fitToBox(Document &doc, float wrapWidth, float width, float height)
 		for (const LineInfo &line : layout.lines)
 			widest = std::max(widest, line.width);
 
-		const float tall = std::max(1.0f, layout.lines.back().baselineY + layout.lines.back().descent -
-							  (layout.lines.front().baselineY - layout.lines.front().ascent));
+		const float tall =
+			std::max(1.0f, layout.lines.back().baselineY + layout.lines.back().descent -
+					       (layout.lines.front().baselineY - layout.lines.front().ascent));
 
 		float lo = std::clamp(doc.fit.minScale, 0.01f, 1.0f);
 		float hi = 1.0f;

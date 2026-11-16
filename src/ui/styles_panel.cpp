@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "editor_common.hpp"
 #include "widgets.hpp"
 #include "../obs/saved_styles.hpp"
+#include "../render/geometry.hpp"
 
 #include <QCheckBox>
 #include <QHBoxLayout>
@@ -119,12 +120,14 @@ QPixmap sample(const SavedStyle &style, QSize size, qreal ratio)
 		p.drawPath(path);
 	}
 
-	if (style.style.fill.type == FillType::Solid) {
+	if (style.style.fill.type == FillType::Solid || style.style.fill.type == FillType::Source) {
 		p.fillPath(path, toQColor(style.style.fill.color));
 	} else {
 		QLinearGradient ramp(area.topLeft(), area.bottomLeft());
-		ramp.setColorAt(0.0, toQColor(style.style.fill.color));
-		ramp.setColorAt(1.0, toQColor(style.style.fill.color2));
+
+		for (const auto &[position, color] : gradientStops(style.style.fill))
+			ramp.setColorAt(qreal(position), toQColor(color));
+
 		p.fillPath(path, ramp);
 	}
 

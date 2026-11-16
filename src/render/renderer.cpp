@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "renderer.hpp"
 #include "../util/log.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include <graphics/vec2.h>
@@ -357,6 +358,33 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 		vec4_set(&clip, -1e9f, -1e9f, 1e9f, 1e9f);
 
 	gs_effect_set_vec4(param("clip_rect"), &clip);
+
+	const MotionSpec &motion = params.motion;
+
+	// Layout is y-down, so "up" is -y.
+	vec2 direction;
+	vec2_set(&direction, 0.0f, -1.0f);
+
+	switch (motion.direction) {
+	case MotionDirection::Up:
+		break;
+	case MotionDirection::Down:
+		vec2_set(&direction, 0.0f, 1.0f);
+		break;
+	case MotionDirection::Left:
+		vec2_set(&direction, -1.0f, 0.0f);
+		break;
+	case MotionDirection::Right:
+		vec2_set(&direction, 1.0f, 0.0f);
+		break;
+	}
+
+	gs_effect_set_float(param("motion_mode"), float(int(motion.motion)));
+	gs_effect_set_float(param("motion_param"), motion.param);
+	gs_effect_set_float(param("motion_duration"), std::max(motion.duration, 1e-4f));
+	gs_effect_set_float(param("motion_stagger"), motion.stagger);
+	gs_effect_set_vec2(param("motion_dir"), &direction);
+	gs_effect_set_float(param("motion_omega"), motion.speed * 6.2831853f);
 
 	gs_effect_set_float(param("loop_time"), params.loopTime);
 	gs_effect_set_texture(param("source_tex"), params.sourceTexture);

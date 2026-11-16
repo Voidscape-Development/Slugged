@@ -1423,6 +1423,9 @@ void EditorWindow::reload()
 	_chatlog->setChecked(obs_data_get_bool(data, "chatlog"));
 	_chatlogLines->setValue(int(obs_data_get_int(data, "chatlog_lines")));
 	_variablesFile->setText(QString::fromUtf8(obs_data_get_string(data, "variables_file")));
+	_counterVariable->setText(QString::fromUtf8(obs_data_get_string(data, settings::kCounterVariableKey)));
+	_counterStep->setValue(obs_data_get_double(data, settings::kCounterStepKey));
+	setCombo(_filterMode, int(config.filterMode));
 
 	obs_data_release(data);
 

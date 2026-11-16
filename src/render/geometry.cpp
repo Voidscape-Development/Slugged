@@ -107,15 +107,11 @@ struct QuadAttrs {
 	Rgba color;
 	Rgba color2;
 
-	float motionMode = 0.0f;
-	float motionParam = 0.0f;
-	float startAll = 0.0f;
-	float duration = 1.0f;
+	// The motion preset, its timing and its direction are the same for every
+	// quad and reach the shader as uniforms; only where a quad falls in the
+	// stagger is its own.
 	float staggerIndex = 0.0f;
 	float startChanged = -1.0f;
-	float dirX = 0.0f;
-	float dirY = -1.0f;
-	float omega = 0.0f;
 
 	// The never-ending effect: kind + 16 * seed, amount, radians per second,
 	// phase. The seed (the glyph's ordinal) is shared by every quad of one
@@ -158,16 +154,19 @@ void emit(GeometryBuffers &out, const std::array<Corner, 4> &corners, const Quad
 	for (const Corner &c : corners) {
 		push4(out.positions, c.x, c.y, 0.0f, 1.0f);
 
-		push4(attr[GeometryBuffers::Em], c.ex, c.ey, float(int(a.kind) + 8 * a.gradientType), a.knockA);
+		// Shape B's knock-out alpha rides in the code's high bits, quantised
+		// to 8 bits: kind and gradient type stay below 64.
+		const float code = float(int(a.kind) + 8 * a.gradientType) +
+				   64.0f * std::round(std::clamp(a.knockB, 0.0f, 1.0f) * 255.0f);
+
+		push4(attr[GeometryBuffers::Em], c.ex, c.ey, code, a.knockA);
 		push4(attr[GeometryBuffers::ABand], a.aBand);
 		push4(attr[GeometryBuffers::AShape], a.aShape);
 		push4(attr[GeometryBuffers::BBand], a.bBand);
 		push4(attr[GeometryBuffers::BShape], a.bShape);
 		push4(attr[GeometryBuffers::Color], a.color.r, a.color.g, a.color.b, a.color.a);
 		push4(attr[GeometryBuffers::Color2], a.color2.r, a.color2.g, a.color2.b, a.color2.a);
-		push4(attr[GeometryBuffers::Motion], a.motionMode, a.motionParam, a.startAll, a.duration);
 		push4(attr[GeometryBuffers::Pivot], pivotX, pivotY, a.staggerIndex, a.startChanged);
-		push4(attr[GeometryBuffers::Direction], a.dirX, a.dirY, a.omega, a.knockB);
 
 		const auto uv = gradient ? gradient(c) : std::pair<float, float>{0.0f, 0.0f};
 
@@ -542,8 +541,7 @@ std::vector<std::pair<float, Rgba>> gradientStops(const Fill &fill)
 		i = j;
 	}
 
-	std::stable_sort(middle.begin(), middle.end(),
-			 [](const auto &x, const auto &y) { return x.first < y.first; });
+	std::stable_sort(middle.begin(), middle.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
 
 	out.insert(out.end(), middle.begin(), middle.end());
 	out.push_back({1.0f, fill.color2});
@@ -666,27 +664,6 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 
 	const MotionSpec &motion = doc.motion;
 
-	// Layout is y-down, so "up" is -y.
-	float dirX = 0.0f;
-	float dirY = -1.0f;
-
-	switch (motion.direction) {
-	case MotionDirection::Up:
-		break;
-	case MotionDirection::Down:
-		dirY = 1.0f;
-		break;
-	case MotionDirection::Left:
-		dirX = -1.0f;
-		dirY = 0.0f;
-		break;
-	case MotionDirection::Right:
-		dirX = 1.0f;
-		dirY = 0.0f;
-		break;
-	}
-
-	const float omega = motion.speed * 2.0f * kPi;
 	const float blurPixels = motion.motion == Motion::Blur ? std::max(motion.param, 0.0f) : 0.0f;
 
 	const bool hasChange = params.changedStart < params.changedEnd;
@@ -718,15 +695,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 	auto motionAttrs = [&](QuadAttrs &a, uint32_t ordinal, uint32_t word, uint32_t line, uint32_t offset) {
 		const float index = staggerIndexOf(ordinal, word, line, motion.order);
 
-		a.motionMode = float(int(motion.motion));
-		a.motionParam = motion.param;
-		a.startAll = index * motion.stagger;
-		a.duration = std::max(motion.duration, 1e-4f);
 		a.staggerIndex = index;
 		a.startChanged = isChanged(offset) ? (index - firstChanged) * motion.stagger : -1.0f;
-		a.dirX = dirX;
-		a.dirY = dirY;
-		a.omega = omega;
 	};
 
 	// The gradient's box when it spans the whole text.
@@ -766,15 +736,15 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 		//
 		// Both are the glyph's silhouette, drawn behind it and knocked out
 		// where the glyph sits. Their softness rides in the second colour:
-		// the width of the edge's fade in pixels, and a gain, so a glow is
-		// solid at the letters' edge and fades out over its size.
-		auto silhouette = [&](float sx, float sy, const Rgba &color, float rampPx, float gain) {
+		// how far past the edge the blur reaches in pixels, and a gain, so a
+		// glow is solid at the letters' edge and fades out over its size.
+		auto silhouette = [&](float sx, float sy, const Rgba &color, float reach, float gain) {
 			if (fillShape) {
 				QuadAttrs a = base;
 
 				a.kind = QuadKind::Shadow;
 				a.color = color;
-				a.color2 = Rgba{rampPx, gain, 0.0f, 0.0f};
+				a.color2 = Rgba{reach, gain, 0.0f, 0.0f};
 				shapeAttrs(*fillShape, a.aBand, a.aShape);
 
 				EmBox box = boxOf(*fillShape);
@@ -791,11 +761,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				a.knockOffsetX = sx / size;
 				a.knockOffsetY = -sy / size;
 
-				// A soft edge reaches half its fade width past the outline;
-				// the gain only makes it more solid inside that.
-				const float reach = rampPx * 0.5f;
-				const auto corners =
-					glyphCorners(box, aaMarginEm(size, blurPixels + rampPx), g.x + sx, g.y + sy, size);
+				const auto corners = glyphCorners(box, aaMarginEm(size, blurPixels + reach), g.x + sx,
+								  g.y + sy, size);
 
 				emit(shadows, corners, a, nullptr);
 				stats.ink.add(g.x + sx + box.x0 * size - reach, g.y + sy - box.y1 * size - reach,
@@ -819,7 +786,7 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 		};
 
 		if (style.glow.enabled && style.glow.size > 0.0f && size > 0.0f)
-			silhouette(0.0f, 0.0f, style.glow.color, 2.0f * style.glow.size, 2.0f);
+			silhouette(0.0f, 0.0f, style.glow.color, style.glow.size, 2.0f);
 
 		if (style.shadow.enabled && size > 0.0f)
 			silhouette(style.shadow.offsetX, style.shadow.offsetY, style.shadow.color,

@@ -82,6 +82,9 @@ const std::vector<StartPoint> &startPoints()
 		{"credits", "Start.Credits", "Start.Credits.About"},
 		{"bot", "Start.Bot", "Start.Bot.About"},
 		{"file", "Start.File", "Start.File.About"},
+		{"counter", "Start.Counter", "Start.Counter.About"},
+		{"messages", "Start.Messages", "Start.Messages.About"},
+		{"neon", "Start.Neon", "Start.Neon.About"},
 	};
 
 	return points;
@@ -237,6 +240,65 @@ bool applyStartPoint(obs_data_t *settings, const std::string &id)
 	} else if (id == "file") {
 		setLines(doc, {""});
 		mode = "file";
+	} else if (id == "counter") {
+		const std::string lead = obs_module_text("Start.Counter.Line1");
+
+		setLines(doc, {(lead + " {count}").c_str()});
+
+		doc.base.sizePx = 72.0f;
+		doc.base.font.weight = 700;
+		doc.base.outline.enabled = true;
+		doc.base.outline.widthPx = 4.0f;
+
+		StyleOverride value;
+		value.color = kAccent;
+		doc.applyStyle(lead.size() + 1, doc.size(), value);
+
+		// The new number pops in as it changes.
+		doc.motion.motion = Motion::Pop;
+		doc.motion.param = motionParamSpec(Motion::Pop).defaultValue;
+		doc.motion.trigger = MotionTrigger::TextChange;
+		doc.motion.scope = MotionScope::Changed;
+
+		if (!variables.count("count"))
+			variables["count"] = "0";
+
+		obs_data_set_string(settings, settings::kCounterVariableKey, "count");
+		obs_data_set_double(settings, settings::kCounterStepKey, 1.0);
+	} else if (id == "messages") {
+		setLines(doc, {obs_module_text("Start.Messages.Line1"), obs_module_text("Start.Messages.Line2"),
+			       obs_module_text("Start.Messages.Line3")});
+
+		doc.base.sizePx = 48.0f;
+		doc.base.font.weight = 600;
+
+		doc.background.enabled = true;
+		doc.background.color = kPlate;
+		doc.background.radius = 12.0f;
+		doc.padding = 18.0f;
+
+		doc.rotate.enabled = true;
+		doc.rotate.interval = 8.0f;
+
+		// Each line rises in while the last one sinks away.
+		doc.motion.motion = Motion::Slide;
+		doc.motion.param = 24.0f;
+		doc.motion.order = MotionOrder::PerWord;
+		doc.motion.direction = MotionDirection::Up;
+		doc.motion.trigger = MotionTrigger::TextChange;
+		doc.motion.scope = MotionScope::All;
+		doc.motion.exit = true;
+	} else if (id == "neon") {
+		setLines(doc, {obs_module_text("Start.Neon.Line1")});
+
+		doc.base.sizePx = 110.0f;
+		doc.base.font.weight = 800;
+		doc.base.fill.color = Rgba{1.0f, 0.93f, 0.98f, 1.0f};
+		doc.base.glow.enabled = true;
+		doc.base.glow.size = 22.0f;
+		doc.base.glow.color = Rgba{1.0f, 0.18f, 0.62f, 0.95f};
+		doc.base.effect.kind = Effect::Shimmer;
+		doc.base.effect.speed = 0.6f;
 	}
 
 	settings::save(settings, doc, false);

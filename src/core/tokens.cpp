@@ -73,8 +73,9 @@ TokenContext::Layer TokenContext::find(const std::string &name, std::string &val
 {
 	const std::string key = normaliseVariableName(name);
 
-	const std::pair<const VariableMap *, Layer> tables[] = {
-		{&_runtime, Layer::Runtime}, {&_source, Layer::Source}, {&_file, Layer::File}};
+	const std::pair<const VariableMap *, Layer> tables[] = {{&_runtime, Layer::Runtime},
+								{&_source, Layer::Source},
+								{&_file, Layer::File}};
 
 	for (const auto &[table, layer] : tables) {
 		const auto it = table->find(key);
@@ -426,7 +427,7 @@ std::string applyFilter(const std::string &value, const std::string &filter)
 
 				// One decimal under 100 (1.2K, 45.3K), none above (120K).
 				return formatPlain(std::fabs(scaled) < 100.0 ? std::floor(scaled * 10.0) / 10.0
-									      : std::floor(scaled),
+									     : std::floor(scaled),
 						   1) +
 				       unit.suffix;
 			}
@@ -451,7 +452,8 @@ std::string applyFilter(const std::string &value, const std::string &filter)
 
 		if (numeric && value.find_first_not_of("+-0123456789") == std::string::npos) {
 			const bool negative = !value.empty() && value[0] == '-';
-			std::string digits = value.substr(!value.empty() && (value[0] == '-' || value[0] == '+') ? 1 : 0);
+			std::string digits =
+				value.substr(!value.empty() && (value[0] == '-' || value[0] == '+') ? 1 : 0);
 
 			while (digits.size() < width)
 				digits.insert(digits.begin(), '0');
@@ -580,9 +582,9 @@ std::vector<NumberSpan> findNumbers(const std::string &text, std::vector<std::st
 		while (j < text.size()) {
 			if (isDigit(text[j])) {
 				j++;
-			} else if (text[j] == ',' && j > span.start && isDigit(text[j - 1]) &&
-				   j + 3 < text.size() && isDigit(text[j + 1]) && isDigit(text[j + 2]) &&
-				   isDigit(text[j + 3]) && (j + 4 >= text.size() || !isDigit(text[j + 4]))) {
+			} else if (text[j] == ',' && j > span.start && isDigit(text[j - 1]) && j + 3 < text.size() &&
+				   isDigit(text[j + 1]) && isDigit(text[j + 2]) && isDigit(text[j + 3]) &&
+				   (j + 4 >= text.size() || !isDigit(text[j + 4]))) {
 				span.grouped = true;
 				j += 4;
 			} else {

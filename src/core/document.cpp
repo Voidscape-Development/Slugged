@@ -506,7 +506,7 @@ void scaleStyle(Style &style, float k)
 void scaleOverride(StyleOverride &o, float k)
 {
 	for (std::optional<float> *field : {&o.size, &o.letterSpacing, &o.wordSpacing, &o.outlineWidth, &o.shadowX,
-					   &o.shadowY, &o.shadowBlur, &o.glowSize})
+					    &o.shadowY, &o.shadowBlur, &o.glowSize})
 		if (*field)
 			**field *= k;
 }

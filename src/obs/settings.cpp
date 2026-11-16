@@ -754,9 +754,24 @@ bool refreshVisibility(obs_properties_t *props, obs_property_t *, obs_data_t *se
 
 	const auto fill = enumFromString(obs_data_get_string(settings, "fill"), FillType::Solid);
 
-	show("gradient_color", fill != FillType::Solid);
+	const bool gradient = fill == FillType::Linear || fill == FillType::Radial;
+
+	show("gradient_color", gradient);
 	show("gradient_angle", fill == FillType::Linear);
-	show("gradient_span", fill != FillType::Solid);
+	show("gradient_span", gradient);
+	show("gradient_stops", gradient);
+	show("fill_source", fill == FillType::Source);
+
+	const bool effect = enumFromString(obs_data_get_string(settings, "effect"), Effect::None) != Effect::None;
+
+	show("effect_strength", effect);
+	show("effect_speed", effect);
+	show("effect_spread", effect);
+
+	show("fit_shrink", obs_data_get_bool(settings, "extents"));
+	show("fit_min", obs_data_get_bool(settings, "extents") && obs_data_get_bool(settings, "fit_shrink"));
+	show("fit_ellipsis", obs_data_get_bool(settings, "extents"));
+	show("count_duration", obs_data_get_bool(settings, "count_up"));
 
 	const bool fixed = obs_data_get_bool(settings, "extents");
 
@@ -836,6 +851,68 @@ bool timerToggleClicked(obs_properties_t *, obs_property_t *, void *data)
 bool timerResetClicked(obs_properties_t *, obs_property_t *, void *data)
 {
 	return callProc(data, "timer_reset");
+}
+
+bool counterUpClicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	return callProc(data, "increment_variable");
+}
+
+bool counterDownClicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	return callProc(data, "decrement_variable");
+}
+
+bool counterResetClicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	return callProc(data, "reset_variable");
+}
+
+bool nextMessageClicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	return callProc(data, "next_message");
+}
+
+// Every source and scene that has a picture, for filling text with one.
+void addPictureSources(obs_property_t *list, obs_source_t *self)
+{
+	struct Context {
+		obs_property_t *list;
+		obs_source_t *self;
+	} context{list, self};
+
+	obs_property_list_add_string(list, obs_module_text("Fill.SourceName.None"), "");
+
+	auto add = [](void *data, obs_source_t *source) {
+		auto *ctx = static_cast<Context *>(data);
+
+		if (source != ctx->self && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO)) {
+			const char *name = obs_source_get_name(source);
+
+			if (name && *name)
+				obs_property_list_add_string(ctx->list, name, name);
+		}
+
+		return true;
+	};
+
+	obs_enum_scenes(add, &context);
+	obs_enum_sources(add, &context);
+}
+
+bool isFilter(obs_source_t *source)
+{
+	return source && obs_source_get_type(source) == OBS_SOURCE_TYPE_FILTER;
+}
+
+void addFilterMode(obs_properties_t *props)
+{
+	obs_property_t *list = obs_properties_add_list(props, kFilterModeKey, obs_module_text("FilterMode"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+
+	obs_property_list_add_string(list, obs_module_text("FilterMode.Overlay"), "overlay");
+	obs_property_list_add_string(list, obs_module_text("FilterMode.Mask"), "mask");
+	obs_property_list_add_string(list, obs_module_text("FilterMode.Knockout"), "knockout");
 }
 
 bool openEditorClicked(obs_properties_t *, obs_property_t *, void *data)
@@ -1095,6 +1172,29 @@ obs_properties_t *basicProperties(obs_source_t *source)
 	obs_property_set_visible(toggle, timer);
 	obs_property_set_visible(reset, timer);
 
+	// The quick controls a counter or a set of turn-taking lines needs while
+	// live, without opening the editor.
+	if (settings && !file) {
+		const std::string text = obs_data_get_string(settings, "text");
+		const std::string counter = obs_data_get_string(settings, kCounterVariableKey);
+
+		if (!counter.empty() && contains(text, ("{" + counter).c_str())) {
+			obs_properties_add_button2(props, "counter_up", obs_module_text("Counter.Up"), counterUpClicked,
+						   source);
+			obs_properties_add_button2(props, "counter_down", obs_module_text("Counter.Down"),
+						   counterDownClicked, source);
+			obs_properties_add_button2(props, "counter_reset", obs_module_text("Counter.Reset"),
+						   counterResetClicked, source);
+		}
+
+		if (obs_data_get_bool(settings, "rotate"))
+			obs_properties_add_button2(props, "rotate_next", obs_module_text("Rotate.Next"),
+						   nextMessageClicked, source);
+	}
+
+	if (isFilter(source))
+		addFilterMode(props);
+
 	obs_properties_add_text(props, "editor_note", obs_module_text("Properties.EditorNote"), OBS_TEXT_INFO);
 
 	obs_data_release(settings);
@@ -1147,10 +1247,18 @@ obs_properties_t *fullProperties(obs_source_t *source)
 
 	obs_properties_add_font(look, "font", obs_module_text("Font"));
 
+	if (isFilter(source))
+		addFilterMode(text);
+
 	addEnumList<FillType>(look, "fill", "Fill",
 			      {{FillType::Solid, "Fill.Solid"},
 			       {FillType::Linear, "Fill.Linear"},
-			       {FillType::Radial, "Fill.Radial"}});
+			       {FillType::Radial, "Fill.Radial"},
+			       {FillType::Source, "Fill.Source"}});
+
+	addPictureSources(obs_properties_add_list(look, "fill_source", obs_module_text("Fill.SourceName"),
+						  OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING),
+			  source);
 
 	obs_properties_add_color_alpha(look, "color", obs_module_text("Color"));
 	obs_properties_add_color_alpha(look, "gradient_color", obs_module_text("Fill.Color2"));
@@ -1159,6 +1267,10 @@ obs_properties_t *fullProperties(obs_source_t *source)
 	addEnumList<GradientSpan>(look, "gradient_span", "Fill.Span",
 				  {{GradientSpan::Text, "Fill.Span.Text"},
 				   {GradientSpan::Character, "Fill.Span.Character"}});
+
+	obs_property_t *stops =
+		obs_properties_add_text(look, "gradient_stops", obs_module_text("Fill.Stops"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(stops, obs_module_text("Fill.Stops.Hint"));
 
 	obs_properties_add_int_slider(look, "opacity", obs_module_text("Opacity"), 0, 100, 1);
 	obs_properties_add_float(look, "letter_spacing", obs_module_text("LetterSpacing"), -200.0, 200.0, 0.5);
@@ -1183,6 +1295,32 @@ obs_properties_t *fullProperties(obs_source_t *source)
 	obs_properties_add_float(shadow, "shadow_x", obs_module_text("Shadow.X"), -200.0, 200.0, 1.0);
 	obs_properties_add_float(shadow, "shadow_y", obs_module_text("Shadow.Y"), -200.0, 200.0, 1.0);
 	obs_properties_add_color_alpha(shadow, "shadow_color", obs_module_text("Shadow.Color"));
+	obs_properties_add_float_slider(shadow, "shadow_blur", obs_module_text("Shadow.Blur"), 0.0, 100.0, 0.5);
+
+	// ---- glow ------------------------------------------------------------
+	obs_properties_t *glow = group(props, "glow", "Glow", OBS_GROUP_CHECKABLE);
+
+	obs_properties_add_float_slider(glow, "glow_size", obs_module_text("Glow.Size"), 1.0, 100.0, 0.5);
+	obs_properties_add_color_alpha(glow, "glow_color", obs_module_text("Glow.Color"));
+
+	// ---- effect ----------------------------------------------------------
+	obs_properties_t *effect = group(props, "group_effect", "Effect", OBS_GROUP_NORMAL);
+
+	addEnumList<Effect>(effect, "effect", "Effect",
+			    {{Effect::None, "Effect.None"},
+			     {Effect::Wave, "Effect.Wave"},
+			     {Effect::Pulse, "Effect.Pulse"},
+			     {Effect::Shake, "Effect.Shake"},
+			     {Effect::Glitch, "Effect.Glitch"},
+			     {Effect::Rainbow, "Effect.Rainbow"},
+			     {Effect::Shimmer, "Effect.Shimmer"}});
+
+	obs_properties_add_float_slider(effect, "effect_strength", obs_module_text("Effect.Strength"), 0.0, 5.0, 0.05);
+	obs_properties_add_float_slider(effect, "effect_speed", obs_module_text("Effect.Speed"), 0.05, 5.0, 0.05);
+
+	obs_property_t *spread = obs_properties_add_float_slider(effect, "effect_spread",
+								 obs_module_text("Effect.Spread"), 0.0, 1.0, 0.01);
+	obs_property_set_long_description(spread, obs_module_text("Effect.Spread.Hint"));
 
 	// ---- layout ----------------------------------------------------------
 	obs_properties_t *layout = group(props, "group_layout", "Group.Layout", OBS_GROUP_NORMAL);
@@ -1209,6 +1347,13 @@ obs_properties_t *fullProperties(obs_source_t *source)
 			      {{WrapMode::None, "Wrap.None"},
 			       {WrapMode::Word, "Wrap.Word"},
 			       {WrapMode::Character, "Wrap.Character"}});
+
+	obs_property_t *shrink = obs_properties_add_bool(layout, "fit_shrink", obs_module_text("Fit.Shrink"));
+	obs_property_set_long_description(shrink, obs_module_text("Fit.Hint"));
+	obs_property_set_modified_callback(shrink, refreshVisibility);
+	obs_property_int_set_suffix(
+		obs_properties_add_int_slider(layout, "fit_min", obs_module_text("Fit.Min"), 5, 100, 1), "%");
+	obs_properties_add_bool(layout, "fit_ellipsis", obs_module_text("Fit.Ellipsis"));
 
 	obs_properties_add_float(layout, "padding", obs_module_text("Padding"), 0.0, 1000.0, 1.0);
 	obs_properties_add_float_slider(layout, "line_height", obs_module_text("LineHeight"), 0.5, 4.0, 0.05);
@@ -1281,6 +1426,21 @@ obs_properties_t *fullProperties(obs_source_t *source)
 	obs_properties_add_button2(motion, "motion_replay_now", obs_module_text("Motion.ReplayNow"), replayClicked,
 				   source);
 
+	obs_property_t *countUp = obs_properties_add_bool(motion, "count_up", obs_module_text("CountUp"));
+	obs_property_set_long_description(countUp, obs_module_text("CountUp.Hint"));
+	obs_property_set_modified_callback(countUp, refreshVisibility);
+	obs_properties_add_float(motion, "count_duration", obs_module_text("CountUp.Duration"), 0.05, 60.0, 0.05);
+
+	// ---- lines taking turns ----------------------------------------------
+	obs_properties_t *rotate = group(props, "rotate", "Rotate", OBS_GROUP_CHECKABLE);
+
+	obs_properties_add_text(rotate, "rotate_help", obs_module_text("Rotate.Hint"), OBS_TEXT_INFO);
+	obs_property_float_set_suffix(obs_properties_add_float(rotate, "rotate_interval",
+							       obs_module_text("Rotate.Interval"), 0.5, 86400.0, 0.5),
+				      " s");
+	obs_properties_add_bool(rotate, "rotate_shuffle", obs_module_text("Rotate.Shuffle"));
+	obs_properties_add_button2(rotate, "rotate_next", obs_module_text("Rotate.Next"), nextMessageClicked, source);
+
 	// ---- scrolling -------------------------------------------------------
 	obs_properties_t *scroll = group(props, "scroll", "Scroll", OBS_GROUP_CHECKABLE);
 
@@ -1304,6 +1464,18 @@ obs_properties_t *fullProperties(obs_source_t *source)
 	obs_properties_add_button2(variables, "timer_toggle", obs_module_text("Timer.Toggle"), timerToggleClicked,
 				   source);
 	obs_properties_add_button2(variables, "timer_reset", obs_module_text("Timer.Reset"), timerResetClicked, source);
+
+	// ---- counter ---------------------------------------------------------
+	obs_properties_t *counter = group(props, "group_counter", "Counter", OBS_GROUP_NORMAL);
+
+	obs_properties_add_text(counter, "counter_help", obs_module_text("Counter.Hint"), OBS_TEXT_INFO);
+	obs_properties_add_text(counter, kCounterVariableKey, obs_module_text("Counter.Variable"), OBS_TEXT_DEFAULT);
+	obs_properties_add_float(counter, kCounterStepKey, obs_module_text("Counter.Step"), -1e9, 1e9, 1.0);
+	obs_properties_add_button2(counter, "counter_up", obs_module_text("Counter.Up"), counterUpClicked, source);
+	obs_properties_add_button2(counter, "counter_down", obs_module_text("Counter.Down"), counterDownClicked,
+				   source);
+	obs_properties_add_button2(counter, "counter_reset", obs_module_text("Counter.Reset"), counterResetClicked,
+				   source);
 
 	return props;
 }

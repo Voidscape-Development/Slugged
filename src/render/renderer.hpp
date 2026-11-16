@@ -40,6 +40,9 @@ public:
 		float elapsed = 0.0f;
 		float opacity = 1.0f;
 
+		// The motion preset and its timing, which every quad shares.
+		MotionSpec motion;
+
 		// Only characters marked as changed animate.
 		bool scopeChanged = false;
 

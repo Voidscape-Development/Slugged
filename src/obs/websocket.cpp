@@ -155,8 +155,9 @@ std::string stringOf(obs_data_t *request, const char *key)
 		out = obs_data_item_get_string(item);
 		break;
 	case OBS_DATA_NUMBER:
-		out = obs_data_item_numtype(item) == OBS_DATA_NUM_INT ? std::to_string(obs_data_item_get_int(item))
-								     : formatPlainNumber(obs_data_item_get_double(item));
+		out = obs_data_item_numtype(item) == OBS_DATA_NUM_INT
+			      ? std::to_string(obs_data_item_get_int(item))
+			      : formatPlainNumber(obs_data_item_get_double(item));
 		break;
 	case OBS_DATA_BOOLEAN:
 		out = obs_data_item_get_bool(item) ? "true" : "false";
@@ -246,8 +247,8 @@ void stepVariable(obs_data_t *request, obs_data_t *response, double sign, bool r
 	calldata_t call = {};
 	calldata_set_string(&call, "name", name.c_str());
 	calldata_set_float(&call, "amount", amount);
-	callOnSource(request, response, reset ? "reset_variable" : (sign > 0.0 ? "increment_variable" : "decrement_variable"),
-		     &call);
+	callOnSource(request, response,
+		     reset ? "reset_variable" : (sign > 0.0 ? "increment_variable" : "decrement_variable"), &call);
 	calldata_free(&call);
 }
 

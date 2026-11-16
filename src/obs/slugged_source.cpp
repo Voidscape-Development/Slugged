@@ -592,8 +592,8 @@ void *createSource(obs_data_t *settingsData, obs_source_t *source, bool isFilter
 							   obs_module_text("Hotkey.TimerReset"), timerResetHotkey, ctx);
 	ctx->counterUpHotkey = obs_hotkey_register_source(source, "Slugged.CounterUp",
 							  obs_module_text("Hotkey.CounterUp"), counterUpHotkey, ctx);
-	ctx->counterDownHotkey = obs_hotkey_register_source(source, "Slugged.CounterDown",
-							    obs_module_text("Hotkey.CounterDown"), counterDownHotkey, ctx);
+	ctx->counterDownHotkey = obs_hotkey_register_source(
+		source, "Slugged.CounterDown", obs_module_text("Hotkey.CounterDown"), counterDownHotkey, ctx);
 	ctx->counterResetHotkey = obs_hotkey_register_source(
 		source, "Slugged.CounterReset", obs_module_text("Hotkey.CounterReset"), counterResetHotkey, ctx);
 	ctx->nextMessageHotkey = obs_hotkey_register_source(
@@ -1027,6 +1027,10 @@ void tickSource(void *data, float seconds)
 	if (needBuild || !ctx->built)
 		scheduleBuild(ctx, expanded, content);
 
+	// A turn that changed nothing on screen (two identical lines) is not
+	// carried over to whatever changes next.
+	ctx->rotateAdvanced = false;
+
 	applyReadyFrame(ctx);
 
 	// ---- animation clock -------------------------------------------------
@@ -1180,8 +1184,7 @@ void uploadPending(SluggedSource *ctx)
 }
 
 // Draws `source` into `render` at its own size, and returns the result.
-gs_texture_t *renderInto(gs_texrender_t *&render, uint32_t width, uint32_t height,
-			 const std::function<void()> &draw)
+gs_texture_t *renderInto(gs_texrender_t *&render, uint32_t width, uint32_t height, const std::function<void()> &draw)
 {
 	if (width == 0 || height == 0)
 		return nullptr;
@@ -1281,6 +1284,7 @@ void renderText(SluggedSource *ctx, const Renderer::DrawParams *extra = nullptr)
 		prepareSourceFill(ctx, params);
 
 	params.elapsed = ctx->animTime;
+	params.motion = doc.motion;
 	params.opacity = doc.opacity;
 	params.scopeChanged = ctx->scopeChanged;
 	params.clip = m.clip;
