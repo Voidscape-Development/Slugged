@@ -321,6 +321,7 @@ private:
 	QWidget *_motionTriggerRow = nullptr;
 	QCheckBox *_motionChangedOnly = nullptr;
 	QCheckBox *_motionExit = nullptr;
+	QCheckBox *_motionLive = nullptr;
 	QDoubleSpinBox *_motionLoopInterval = nullptr;
 	QWidget *_motionLoopRow = nullptr;
 	ui::Segmented *_motionOrder = nullptr;

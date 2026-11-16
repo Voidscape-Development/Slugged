@@ -149,8 +149,9 @@ Every preset but Wave settles into its final state and holds it, so what matters
 preset is when it plays. **Play** decides:
 
 - **When the text changes** — its content, that is. A clock ticking over is not a change; a variable
-  being set is. Choose whether to animate only the characters that changed or all of them, and
-  whether to animate the old text out first.
+  being set is. Turn on **Also when a clock or timer ticks** to count those too, so a countdown's
+  digits animate as they turn. Choose whether to animate only the characters that changed or all
+  of them, and whether to animate the old text out first.
 - **When the source is shown** — anywhere, including the Studio Mode preview.
 - **When the source goes live** — on the program output. The right choice for intros in Studio Mode.
 - **On a loop**, or **only when the settings change**.

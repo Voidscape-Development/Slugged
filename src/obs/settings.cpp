@@ -375,6 +375,7 @@ void writeMotion(obs_data_t *data, const MotionSpec &m, const ScrollSpec &s)
 	put(data, "motion_replay", m.trigger);
 	put(data, "motion_scope", m.scope);
 	put(data, "motion_exit", m.exit);
+	put(data, "motion_live", m.live);
 	put(data, "motion_loop_interval", m.loopInterval);
 
 	put(data, "scroll", s.enabled);
@@ -403,6 +404,7 @@ void readMotion(obs_data_t *data, MotionSpec &m, ScrollSpec &s)
 	read("motion_replay", m.trigger);
 	read("motion_scope", m.scope);
 	read("motion_exit", m.exit);
+	read("motion_live", m.live);
 	read("motion_loop_interval", m.loopInterval);
 
 	m.duration = m.duration > 0.0f ? m.duration : 0.35f;
@@ -748,6 +750,7 @@ bool refreshVisibility(obs_properties_t *props, obs_property_t *, obs_data_t *se
 	show("motion_replay", timed);
 	show("motion_scope", timed && trigger == MotionTrigger::TextChange);
 	show("motion_exit", timed && trigger == MotionTrigger::TextChange);
+	show("motion_live", timed && trigger == MotionTrigger::TextChange);
 	show("motion_loop_interval", timed && trigger == MotionTrigger::Loop);
 	show("motion_replay_now", animated);
 
@@ -938,6 +941,7 @@ void defaults(obs_data_t *data)
 	putDefault(data, "motion_replay", m.trigger);
 	putDefault(data, "motion_scope", m.scope);
 	putDefault(data, "motion_exit", m.exit);
+	putDefault(data, "motion_live", m.live);
 	putDefault(data, "motion_loop_interval", m.loopInterval);
 
 	const ScrollSpec &s = doc.scroll;
@@ -1224,6 +1228,9 @@ obs_properties_t *fullProperties(obs_source_t *source)
 				  {MotionScope::All, "Motion.Scope.All"}});
 
 	obs_properties_add_bool(motion, "motion_exit", obs_module_text("Motion.Exit"));
+
+	obs_property_t *live = obs_properties_add_bool(motion, "motion_live", obs_module_text("Motion.Live"));
+	obs_property_set_long_description(live, obs_module_text("Motion.Live.Hint"));
 
 	obs_properties_add_float(motion, "motion_loop_interval", obs_module_text("Motion.Replay.Interval"), 0.1, 3600.0,
 				 0.1);

@@ -162,9 +162,13 @@ bool applyStartPoint(obs_data_t *settings, const std::string &id)
 		first.color = kAccent;
 		styleLine(doc, 0, first);
 
-		doc.motion.motion = Motion::Fade;
-		doc.motion.order = MotionOrder::PerLine;
-		doc.motion.trigger = MotionTrigger::Show;
+		// Each digit pops in as it turns.
+		doc.motion.motion = Motion::Pop;
+		doc.motion.param = motionParamSpec(Motion::Pop).defaultValue;
+		doc.motion.order = MotionOrder::PerCharacter;
+		doc.motion.trigger = MotionTrigger::TextChange;
+		doc.motion.scope = MotionScope::Changed;
+		doc.motion.live = true;
 	} else if (id == "timer") {
 		setLines(doc, {"{stream_time}"});
 

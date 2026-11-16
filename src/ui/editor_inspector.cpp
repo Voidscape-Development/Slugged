@@ -754,6 +754,12 @@ void EditorWindow::buildMotionSection()
 	connect(_motionExit, &QCheckBox::clicked, this,
 		[this](bool on) { applyDocument([on](Document &d) { d.motion.exit = on; }); });
 
+	_motionLive = new QCheckBox(tr_("Motion.Live"), _motionTriggerRow);
+	_motionLive->setToolTip(tr_("Motion.Live.Hint"));
+
+	connect(_motionLive, &QCheckBox::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.motion.live = on; }); });
+
 	_motionLoopInterval =
 		motionFloat(0.1, 3600.0, 0.5, " s", 1, [](MotionSpec &m, float v) { m.loopInterval = v; });
 	_motionLoopRow = row(tr_("Motion.Replay.Interval"), _motionLoopInterval, _motionTriggerRow);
@@ -762,6 +768,7 @@ void EditorWindow::buildMotionSection()
 	triggerLayout->addWidget(_motionTrigger);
 	triggerLayout->addWidget(_motionChangedOnly);
 	triggerLayout->addWidget(_motionExit);
+	triggerLayout->addWidget(_motionLive);
 	triggerLayout->addWidget(_motionLoopRow);
 
 	auto *orderLabel = new QLabel(tr_("Editor.Motion.Move"), _motionDetails);
@@ -1362,6 +1369,7 @@ void EditorWindow::syncControls()
 	setCombo(_motionTrigger, int(m.trigger));
 	_motionChangedOnly->setChecked(m.scope == MotionScope::Changed);
 	_motionExit->setChecked(m.exit);
+	_motionLive->setChecked(m.live);
 	_motionLoopInterval->setValue(double(m.loopInterval));
 	_motionOrder->setValue(int(m.order));
 	setCombo(_motionDirection, int(m.direction));
@@ -1482,6 +1490,7 @@ void EditorWindow::syncVisibility()
 	_motionTriggerRow->setVisible(timed);
 	_motionChangedOnly->setVisible(onText);
 	_motionExit->setVisible(onText);
+	_motionLive->setVisible(onText);
 	_motionLoopRow->setVisible(timed && m.trigger == MotionTrigger::Loop);
 	_motionDirectionRow->setVisible(motionHasDirection(m.motion));
 	_motionPaceRow->setVisible(timed);

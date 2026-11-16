@@ -437,6 +437,14 @@ void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::s
 			ctx->replayChangedOnly = motion.scope == MotionScope::Changed;
 			ctx->replayIsTextChange = true;
 		}
+	} else if (motion.live && motion.trigger == MotionTrigger::TextChange && motionIsTransient(motion.motion) &&
+		   expanded != ctx->lastExpanded) {
+		// Asked for: a live value ticking over animates like any other change,
+		// so a countdown's digits move as they turn.
+		ctx->animRange = diffRange(ctx->lastExpanded, expanded);
+		ctx->replayOnFrame = id;
+		ctx->replayChangedOnly = motion.scope == MotionScope::Changed;
+		ctx->replayIsTextChange = true;
 	} else {
 		ctx->animRange = shiftRange(ctx->animRange, ctx->lastExpanded, expanded);
 	}
