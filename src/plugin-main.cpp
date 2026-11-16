@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/variables.hpp"
 #include "obs/editor_bridge.hpp"
 #include "obs/host_tokens.hpp"
+#include "obs/saved_styles.hpp"
 #include "obs/settings.hpp"
 #include "obs/slugged_source.hpp"
 #include "render/rebuild_worker.hpp"
@@ -104,6 +105,7 @@ bool obs_module_load(void)
 	slugged::setLogSink(logToObs);
 
 	slugged::settings::loadGlobalVariables();
+	slugged::styles::load();
 	slugged::host::startup();
 
 	slugged::registerSluggedSource();

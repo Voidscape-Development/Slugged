@@ -18,6 +18,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include "../text/edit_map.hpp"
+
+#include <memory>
+#include <string>
+
+#include <obs.h>
+
 namespace slugged {
 
 extern const char *const kSourceId;
@@ -25,5 +32,30 @@ extern const char *const kFilterId;
 
 // Registers the source and the overlay filter.
 void registerSluggedSource();
+
+// ---- for the editor ----------------------------------------------------------
+//
+// Each of these accepts any source and does nothing for one that is not a
+// Slugged source or filter. All are safe from the UI thread.
+
+bool isSluggedSource(obs_source_t *source);
+
+// While an editor is attached, every frame the source builds carries an edit
+// map: where its text sits, for typing on the preview.
+void setEditorAttached(obs_source_t *source, bool attached);
+
+// The edit map of the frame currently shown, or null.
+std::shared_ptr<const EditMap> editMapOf(obs_source_t *source);
+
+// The source's stopwatch.
+struct TimerState {
+	float seconds = 0.0f;
+	bool running = false;
+};
+
+TimerState timerStateOf(obs_source_t *source);
+
+// `text` with every token replaced by what this source would show for it now.
+std::string expandFor(obs_source_t *source, const std::string &text);
 
 } // namespace slugged

@@ -34,11 +34,18 @@ struct Measured {
 	float advancePx = 0.0f;
 	bool breakBefore = false;
 	uint32_t textOffset = 0;
+
+	// Where this glyph's cluster ends in the document's plain text.
+	uint32_t textEnd = 0;
 };
 
 struct PendingLine {
 	std::vector<Measured> glyphs;
 	bool lastInParagraph = false;
+
+	// Filled in once the paragraph's lines are known.
+	uint32_t textStart = 0;
+	uint32_t textEnd = 0;
 };
 
 struct BlockLines {
@@ -175,6 +182,19 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 
 		entry.baseLevel = shaped.baseLevel;
 
+		// Every cluster the paragraph has, so each glyph knows where its own
+		// cluster ends whatever order the shaper emitted them in.
+		std::vector<uint32_t> clusterStarts;
+		clusterStarts.reserve(shaped.glyphs.size());
+
+		for (const ShapedGlyph &g : shaped.glyphs)
+			clusterStarts.push_back(g.cluster);
+
+		std::sort(clusterStarts.begin(), clusterStarts.end());
+		clusterStarts.erase(std::unique(clusterStarts.begin(), clusterStarts.end()), clusterStarts.end());
+
+		const uint32_t blockEnd = blockOffset + uint32_t(block.size());
+
 		std::vector<Measured> current;
 		float width = 0.0f;
 		size_t lastBreak = 0;
@@ -188,6 +208,11 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 				      (g.whitespace ? m.style->wordSpacing : 0.0f);
 			m.breakBefore = g.clusterStart && g.cluster < breaks.size() && breaks[g.cluster];
 			m.textOffset = blockOffset + g.cluster;
+
+			const auto nextCluster =
+				std::upper_bound(clusterStarts.begin(), clusterStarts.end(), g.cluster);
+
+			m.textEnd = nextCluster != clusterStarts.end() ? blockOffset + *nextCluster : blockEnd;
 
 			// Whitespace may hang past the edge; only ink has to fit.
 			if (wraps && !current.empty() && !g.whitespace && width + m.advancePx > availableWidth) {
@@ -233,6 +258,24 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 		}
 
 		entry.lines.push_back(PendingLine{std::move(current), true});
+
+		// Each line's share of the text: from its first glyph to the next
+		// line's. Glyphs are still in logical order here.
+		for (size_t i = 0; i < entry.lines.size(); i++) {
+			PendingLine &line = entry.lines[i];
+
+			if (i == 0)
+				line.textStart = blockOffset;
+			else if (!line.glyphs.empty())
+				line.textStart = line.glyphs.front().textOffset;
+			else
+				line.textStart = blockEnd;
+
+			line.textEnd = blockEnd;
+
+			if (i > 0)
+				entry.lines[i - 1].textEnd = line.textStart;
+		}
 
 		for (PendingLine &line : entry.lines) {
 			// Trailing whitespace neither counts toward the width nor draws.
@@ -344,6 +387,9 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 			info.width = justifyExtra > 0.0f ? limit : width;
 			info.ascent = metrics.ascent;
 			info.descent = metrics.descent;
+			info.textStart = line.textStart;
+			info.textEnd = line.textEnd;
+			info.rtl = rtl;
 
 			float penX = startX;
 
@@ -433,7 +479,26 @@ LayoutResult Layout::run(const Document &doc, float availableWidth, float availa
 					result.glyphs.push_back(pg);
 				}
 
-				penX += m.advancePx + (m.glyph.whitespace ? justifyExtra : 0.0f);
+				const float advance = m.advancePx + (m.glyph.whitespace ? justifyExtra : 0.0f);
+
+				// Marks and the parts of a ligature share their cluster's cell.
+				if (!result.cells.empty() && result.cells.back().lineIndex == lineIndex &&
+				    result.cells.back().start == m.textOffset) {
+					result.cells.back().x1 = penX + advance;
+				} else {
+					CaretCell cell;
+
+					cell.lineIndex = lineIndex;
+					cell.x0 = penX;
+					cell.x1 = penX + advance;
+					cell.start = m.textOffset;
+					cell.end = m.textEnd;
+					cell.rtl = (m.glyph.level & 1) != 0;
+
+					result.cells.push_back(cell);
+				}
+
+				penX += advance;
 			}
 
 			closeSpan(underline, false, penX);

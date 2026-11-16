@@ -30,6 +30,10 @@ namespace editor {
 // without Qt these become no-ops and the source still works fully from the
 // standard properties dialog.
 
+// True when this build has the editor. The properties dialog shrinks to the
+// basics when it does, and stays complete when it does not.
+bool available();
+
 // Opens (or raises) the editor window for `source`.
 void openFor(obs_source_t *source);
 

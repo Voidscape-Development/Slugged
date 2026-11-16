@@ -17,6 +17,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "settings.hpp"
+#include "saved_styles.hpp"
 #include "editor_bridge.hpp"
 #include "../core/markup.hpp"
 #include "../text/font_enum.hpp"
@@ -362,6 +363,62 @@ ParagraphOverride readParagraphOverride(obs_data_t *obj)
 // Document-level fields
 // ---------------------------------------------------------------------------
 
+void writeMotion(obs_data_t *data, const MotionSpec &m, const ScrollSpec &s)
+{
+	put(data, "motion", m.motion);
+	put(data, "motion_order", m.order);
+	put(data, "motion_direction", m.direction);
+	put(data, "motion_duration", m.duration);
+	put(data, "motion_stagger", m.stagger);
+	put(data, "motion_param", m.param);
+	put(data, "motion_speed", m.speed);
+	put(data, "motion_replay", m.trigger);
+	put(data, "motion_scope", m.scope);
+	put(data, "motion_exit", m.exit);
+	put(data, "motion_loop_interval", m.loopInterval);
+
+	put(data, "scroll", s.enabled);
+	put(data, "scroll_x", s.speedX);
+	put(data, "scroll_y", s.speedY);
+	put(data, "scroll_loop", s.loop);
+	put(data, "scroll_gap", s.gap);
+}
+
+// Reads over whatever `m` and `s` already hold, so a key that is missing keeps
+// its default.
+void readMotion(obs_data_t *data, MotionSpec &m, ScrollSpec &s)
+{
+	auto read = [data](const char *key, auto &out) {
+		if (obs_data_has_user_value(data, key) || obs_data_has_default_value(data, key))
+			get(data, key, out);
+	};
+
+	read("motion", m.motion);
+	read("motion_order", m.order);
+	read("motion_direction", m.direction);
+	read("motion_duration", m.duration);
+	read("motion_stagger", m.stagger);
+	read("motion_param", m.param);
+	read("motion_speed", m.speed);
+	read("motion_replay", m.trigger);
+	read("motion_scope", m.scope);
+	read("motion_exit", m.exit);
+	read("motion_loop_interval", m.loopInterval);
+
+	m.duration = m.duration > 0.0f ? m.duration : 0.35f;
+	m.stagger = std::max(m.stagger, 0.0f);
+	m.speed = m.speed > 0.0f ? m.speed : 0.5f;
+	m.loopInterval = m.loopInterval > 0.0f ? m.loopInterval : 5.0f;
+
+	read("scroll", s.enabled);
+	read("scroll_x", s.speedX);
+	read("scroll_y", s.speedY);
+	read("scroll_loop", s.loop);
+	read("scroll_gap", s.gap);
+
+	s.gap = std::max(s.gap, 0.0f);
+}
+
 void writeLayout(obs_data_t *data, const Document &doc)
 {
 #define SLUGGED_X(name, type, member, key) put(data, key, doc.paragraph.member);
@@ -381,27 +438,7 @@ void writeLayout(obs_data_t *data, const Document &doc)
 
 	obs_data_set_int(data, "opacity", std::lround(doc.opacity * 100.0f));
 
-	const MotionSpec &m = doc.motion;
-
-	put(data, "motion", m.motion);
-	put(data, "motion_order", m.order);
-	put(data, "motion_direction", m.direction);
-	put(data, "motion_duration", m.duration);
-	put(data, "motion_stagger", m.stagger);
-	put(data, "motion_param", m.param);
-	put(data, "motion_speed", m.speed);
-	put(data, "motion_replay", m.trigger);
-	put(data, "motion_scope", m.scope);
-	put(data, "motion_exit", m.exit);
-	put(data, "motion_loop_interval", m.loopInterval);
-
-	const ScrollSpec &s = doc.scroll;
-
-	put(data, "scroll", s.enabled);
-	put(data, "scroll_x", s.speedX);
-	put(data, "scroll_y", s.speedY);
-	put(data, "scroll_loop", s.loop);
-	put(data, "scroll_gap", s.gap);
+	writeMotion(data, doc.motion, doc.scroll);
 }
 
 void readLayout(obs_data_t *data, Document &doc)
@@ -425,34 +462,7 @@ void readLayout(obs_data_t *data, Document &doc)
 
 	doc.opacity = std::clamp(float(obs_data_get_int(data, "opacity")) / 100.0f, 0.0f, 1.0f);
 
-	MotionSpec &m = doc.motion;
-
-	get(data, "motion", m.motion);
-	get(data, "motion_order", m.order);
-	get(data, "motion_direction", m.direction);
-	get(data, "motion_duration", m.duration);
-	get(data, "motion_stagger", m.stagger);
-	get(data, "motion_param", m.param);
-	get(data, "motion_speed", m.speed);
-	get(data, "motion_replay", m.trigger);
-	get(data, "motion_scope", m.scope);
-	get(data, "motion_exit", m.exit);
-	get(data, "motion_loop_interval", m.loopInterval);
-
-	m.duration = m.duration > 0.0f ? m.duration : 0.35f;
-	m.stagger = std::max(m.stagger, 0.0f);
-	m.speed = m.speed > 0.0f ? m.speed : 0.5f;
-	m.loopInterval = m.loopInterval > 0.0f ? m.loopInterval : 5.0f;
-
-	ScrollSpec &s = doc.scroll;
-
-	get(data, "scroll", s.enabled);
-	get(data, "scroll_x", s.speedX);
-	get(data, "scroll_y", s.speedY);
-	get(data, "scroll_loop", s.loop);
-	get(data, "scroll_gap", s.gap);
-
-	s.gap = std::max(s.gap, 0.0f);
+	readMotion(data, doc.motion, doc.scroll);
 }
 
 void writeContent(obs_data_t *data, const Document &doc)
@@ -939,7 +949,126 @@ void defaults(obs_data_t *data)
 	putDefault(data, "scroll_gap", s.gap);
 }
 
+namespace {
+
+bool usesTimer(obs_data_t *settings)
+{
+	const std::string text = obs_data_get_string(settings, "text");
+
+	return contains(text, "{timer") || contains(text, "{countdown");
+}
+
+bool refreshTimerButtons(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	const bool wanted = usesTimer(settings);
+
+	bool changed = false;
+
+	for (const char *name : {"timer_toggle", "timer_reset"}) {
+		obs_property_t *p = obs_properties_get(props, name);
+
+		if (p && obs_property_visible(p) != wanted) {
+			obs_property_set_visible(p, wanted);
+			changed = true;
+		}
+	}
+
+	return changed;
+}
+
+// Picking a saved style applies it there and then; the list itself goes back
+// to its prompt, because a style is something done to the text, not a setting
+// the source keeps.
+bool applyStylePicked(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	const std::string name = obs_data_get_string(settings, "apply_style");
+
+	if (name.empty())
+		return false;
+
+	obs_data_set_string(settings, "apply_style", "");
+
+	SavedStyle style;
+
+	if (!styles::find(name, style))
+		return true;
+
+	SourceConfig config = load(settings);
+
+	styles::apply(config.document, style);
+	save(settings, config.document, config.markup);
+
+	return true;
+}
+
+// What the dialog shows when the editor exists: enough to change the words,
+// the font and the colour without opening it, and the way in.
+obs_properties_t *basicProperties(obs_source_t *source)
+{
+	obs_properties_t *props = obs_properties_create();
+
+	obs_properties_add_button2(props, "open_editor", obs_module_text("OpenEditor"), openEditorClicked, source);
+
+	obs_data_t *settings = source ? obs_source_get_settings(source) : nullptr;
+	const bool file = settings && std::strcmp(obs_data_get_string(settings, "mode"), "file") == 0;
+
+	if (file) {
+		obs_properties_add_path(props, "file", obs_module_text("File"), OBS_PATH_FILE,
+					obs_module_text("File.Filter"), nullptr);
+	} else {
+		obs_property_t *text =
+			obs_properties_add_text(props, "text", obs_module_text("Text"), OBS_TEXT_MULTILINE);
+		obs_property_set_modified_callback(text, refreshTimerButtons);
+	}
+
+	obs_properties_add_font(props, "font", obs_module_text("Font"));
+	obs_properties_add_color_alpha(props, "color", obs_module_text("Color"));
+
+	const std::vector<SavedStyle> saved = styles::all();
+
+	if (!saved.empty()) {
+		obs_property_t *list = obs_properties_add_list(props, "apply_style", obs_module_text("Styles.Apply"),
+							       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+
+		obs_property_list_add_string(list, obs_module_text("Styles.Choose"), "");
+
+		for (const SavedStyle &style : saved)
+			obs_property_list_add_string(list, style.name.c_str(), style.name.c_str());
+
+		obs_property_set_modified_callback(list, applyStylePicked);
+	}
+
+	obs_property_t *toggle = obs_properties_add_button2(props, "timer_toggle", obs_module_text("Timer.Toggle"),
+							    timerToggleClicked, source);
+	obs_property_t *reset = obs_properties_add_button2(props, "timer_reset", obs_module_text("Timer.Reset"),
+							   timerResetClicked, source);
+
+	const bool timer = settings && !file && usesTimer(settings);
+
+	obs_property_set_visible(toggle, timer);
+	obs_property_set_visible(reset, timer);
+
+	obs_properties_add_text(props, "editor_note", obs_module_text("Properties.EditorNote"), OBS_TEXT_INFO);
+
+	obs_data_release(settings);
+
+	return props;
+}
+
+obs_properties_t *fullProperties(obs_source_t *source);
+
+} // namespace
+
 obs_properties_t *properties(obs_source_t *source)
+{
+	// Without the editor, the dialog is the only way to reach anything, so it
+	// shows everything.
+	return editor::available() ? basicProperties(source) : fullProperties(source);
+}
+
+namespace {
+
+obs_properties_t *fullProperties(obs_source_t *source)
 {
 	obs_properties_t *props = obs_properties_create();
 
@@ -1127,6 +1256,52 @@ obs_properties_t *properties(obs_source_t *source)
 	obs_properties_add_button2(variables, "timer_reset", obs_module_text("Timer.Reset"), timerResetClicked, source);
 
 	return props;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Standalone styles
+// ---------------------------------------------------------------------------
+
+void styleToData(obs_data_t *obj, const Style &style){
+#define SLUGGED_X(name, type, member, key) put(obj, key, style.member);
+	SLUGGED_STYLE_FIELDS(SLUGGED_X)
+#undef SLUGGED_X
+}
+
+Style styleFromData(obs_data_t *obj)
+{
+	return readOverride(obj).resolve(Style{});
+}
+
+void motionToData(obs_data_t *obj, const MotionSpec &motion, const ScrollSpec &scroll)
+{
+	writeMotion(obj, motion, scroll);
+}
+
+void motionFromData(obs_data_t *obj, MotionSpec &motion, ScrollSpec &scroll)
+{
+	readMotion(obj, motion, scroll);
+}
+
+void backgroundToData(obs_data_t *obj, const Background &background, float padding)
+{
+	put(obj, "background", background.enabled);
+	put(obj, "background_color", background.color);
+	put(obj, "background_radius", background.radius);
+	put(obj, "padding", padding);
+}
+
+void backgroundFromData(obs_data_t *obj, Background &background, float &padding)
+{
+	get(obj, "background", background.enabled);
+
+	if (obs_data_has_user_value(obj, "background_color"))
+		get(obj, "background_color", background.color);
+
+	get(obj, "background_radius", background.radius);
+	get(obj, "padding", padding);
 }
 
 void contentFromData(obs_data_t *data, Document &doc)

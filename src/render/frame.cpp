@@ -62,6 +62,9 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 	InkBounds extent = stats.ink;
 	extent.add(0.0f, 0.0f, layout.width, layout.height);
 
+	float editX = padding;
+	float editY = padding;
+
 	if (fixed) {
 		out.geometry.translate(padding, padding);
 
@@ -81,6 +84,9 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 
 		out.geometry.translate(dx, dy);
 
+		editX = dx;
+		editY = dy;
+
 		out.width = uint32_t(std::max(1.0f, std::ceil(std::max(extent.x1, 0.0f) + dx + padding)));
 		out.height = uint32_t(std::max(1.0f, std::ceil(std::max(extent.y1, 0.0f) + dy + padding)));
 
@@ -92,6 +98,10 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 		out.contentX1 = extent.x1 + dx;
 		out.contentY1 = extent.y1 + dy;
 	}
+
+	if (input.wantEditMap)
+		out.editMap = std::make_shared<const EditMap>(
+			EditMap::build(layout, input.tokenSpans, editX, editY, input.writtenSize));
 
 	GeometryBuilder::buildBackground(doc.background, float(out.width), float(out.height), out.background);
 

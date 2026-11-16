@@ -19,12 +19,15 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "harness.hpp"
 
 #include "core/document.hpp"
+#include "core/tokens.hpp"
+#include "text/edit_map.hpp"
 #include "text/font_enum.hpp"
 #include "text/font_manager.hpp"
 #include "text/layout.hpp"
 #include "text/line_break.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 using namespace slugged;
@@ -236,4 +239,148 @@ TEST(font_instances_are_shared_and_stable)
 
 	// A missing family falls back to the default rather than failing.
 	CHECK(fonts.acquire(missing) != nullptr);
+}
+
+// ---- edit map ----------------------------------------------------------------
+
+namespace {
+
+EditMap mapOf(const Document &written, const TokenContext &tokens, float width = 0.0f)
+{
+	Document expanded = written;
+	std::vector<TokenSpan> spans;
+
+	expanded.expandTokens(tokens, spans);
+
+	auto guard = FontManager::instance().lock();
+
+	return EditMap::build(Layout::run(expanded, width, 0.0f), spans, 0.0f, 0.0f, uint32_t(written.size()));
+}
+
+} // namespace
+
+TEST(edit_map_caret_moves_through_plain_text)
+{
+	if (!haveFonts())
+		return;
+
+	const EditMap map = mapOf(docWith("abc"), TokenContext());
+
+	CHECK_EQ(map.lines.size(), size_t(1));
+
+	// Each caret stop is further right than the last.
+	CHECK(map.caret(0).x < map.caret(1).x);
+	CHECK(map.caret(1).x < map.caret(2).x);
+	CHECK(map.caret(2).x < map.caret(3).x);
+	CHECK(map.caret(0).height > 0.0f);
+}
+
+TEST(edit_map_hit_test_round_trips_a_caret)
+{
+	if (!haveFonts())
+		return;
+
+	const EditMap map = mapOf(docWith("hello world"), TokenContext());
+
+	for (uint32_t offset = 0; offset <= 11; offset++) {
+		const EditMap::Rect caret = map.caret(offset);
+
+		CHECK_EQ(map.hitTest(caret.x, caret.y + caret.height * 0.5f), offset);
+	}
+
+	// Far outside the text resolves to its ends.
+	CHECK_EQ(map.hitTest(-1000.0f, 0.0f), uint32_t(0));
+	CHECK_EQ(map.hitTest(100000.0f, 0.0f), uint32_t(11));
+}
+
+TEST(edit_map_lines_and_empty_paragraphs)
+{
+	if (!haveFonts())
+		return;
+
+	const EditMap map = mapOf(docWith("ab\n\ncd"), TokenContext());
+
+	CHECK_EQ(map.lines.size(), size_t(3));
+	CHECK_EQ(map.lines[1].start, uint32_t(3));
+	CHECK_EQ(map.lines[2].start, uint32_t(4));
+
+	// The empty line has a caret of its own, on its own row.
+	CHECK(map.caret(3).y > map.caret(0).y);
+	CHECK(map.caret(4).y > map.caret(3).y);
+
+	// A click on the empty line lands in it.
+	CHECK_EQ(map.hitTest(50.0f, map.caret(3).y + 1.0f), uint32_t(3));
+
+	// Up and down keep the column.
+	CHECK_EQ(map.vertical(5, -2), uint32_t(1));
+	CHECK_EQ(map.vertical(1, 1), uint32_t(3));
+
+	// A selection across the break covers all three lines.
+	CHECK_EQ(map.selection(0, 6).size(), size_t(3));
+	CHECK(map.selection(2, 2).empty());
+}
+
+TEST(edit_map_treats_a_token_as_one_unit)
+{
+	if (!haveFonts())
+		return;
+
+	TokenContext tokens;
+	tokens.set("n", "12345");
+
+	// "a{n}b" shows as "a12345b".
+	const EditMap map = mapOf(docWith("a{n}b"), tokens);
+
+	CHECK_EQ(map.textSize, uint32_t(5));
+	CHECK_EQ(map.tokens().size(), size_t(1));
+
+	// Offsets are in the text as written: 1 is before the token, 4 after it.
+	const float before = map.caret(1).x;
+	const float after = map.caret(4).x;
+
+	CHECK(before < after);
+	CHECK(map.caret(4).x < map.caret(5).x);
+
+	// The token is as wide as what it shows.
+	CHECK(std::abs(map.tokens()[0].width - (after - before)) < 0.01f);
+
+	// A click inside the value lands on whichever end is nearer.
+	const float y = map.caret(0).y + 1.0f;
+
+	CHECK_EQ(map.hitTest(before + (after - before) * 0.2f, y), uint32_t(1));
+	CHECK_EQ(map.hitTest(before + (after - before) * 0.8f, y), uint32_t(4));
+
+	uint32_t start = 0;
+	uint32_t end = 0;
+
+	CHECK(map.tokenAt(2, start, end));
+	CHECK_EQ(start, uint32_t(1));
+	CHECK_EQ(end, uint32_t(4));
+	CHECK(!map.tokenAt(1, start, end));
+
+	// Selecting the token selects all of what it shows.
+	const std::vector<EditMap::Rect> selected = map.selection(1, 4);
+
+	CHECK_EQ(selected.size(), size_t(1));
+	CHECK(std::abs(selected[0].width - (after - before)) < 0.01f);
+}
+
+TEST(edit_map_follows_wrapped_lines)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("aaaa bbbb cccc");
+	doc.wrap = WrapMode::Word;
+
+	const float oneWord = layOut(docWith("aaaa b")).width;
+	const EditMap map = mapOf(doc, TokenContext(), oneWord);
+
+	CHECK(map.lines.size() >= size_t(2));
+	CHECK_EQ(map.lines[0].start, uint32_t(0));
+	CHECK_EQ(map.lines[1].start, uint32_t(5));
+
+	// The start of the second line is on the second row, at its left.
+	CHECK(map.caret(5).y > map.caret(4).y);
+	CHECK(map.caret(5).x <= map.caret(6).x);
 }

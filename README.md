@@ -33,28 +33,59 @@ plus:
 - **Scrolling** tickers and credit rolls, clipped to the source's box.
 - **Template tokens** like `{time}`, `{stream_time}`, a controllable `{timer}`, `{countdown:5:00}`,
   `{until:20:00}` and your own variables.
-- **A WYSIWYG editor** whose preview is a live OBS render of the source itself, with undo.
+- **An editor you type in.** Its preview is a live OBS render of the source, and it is also where
+  the caret is: click the text and type. Starting points, saved styles and a list of live values
+  come with it.
 - **An overlay filter** variant, to lay text over any other source.
 - **One-step conversion** of existing GDI+ and FreeType text sources, in place.
 
+## The editor
+
+**Open editor…** in a source's properties opens it. Everything applies as you make it and can be
+undone from OBS's **Edit → Undo** (or the editor's own buttons, which are the same history).
+
+- **Starting points.** A new source's editor opens on nine of them — plain text, name and title,
+  clock, countdown, stream timer, ticker, credits roll, message from a bot, text from a file. Each
+  sets up the text, the look and the motion, and all of it can be changed afterwards. *Choose a
+  different starting point…* under **More** brings them back.
+- **Type on the preview.** Click the text to put the caret there; select by dragging or
+  double-clicking. A live value such as a countdown shows what it currently says, with a dotted
+  underline, and behaves as one character: the caret steps over it and Backspace removes it whole.
+- **The panel says what it will change.** Its header reads *The whole text* or *Only the selected
+  text*. With a selection, a bar above the preview offers size, bold, italic, colour and *Clear
+  style*, and settings that differ from the rest of the text are outlined.
+- **One panel, folded.** Text, Effects, Layout, Motion and More are sections of one column; a folded
+  section shows what it is set to. Outline, shadow, background and scrolling are switches that show
+  their settings only while on.
+- **Insert live value** lists every token with what it says right now, and holds your own values —
+  for this source or shared by every Slugged source. Typing `{` in the text opens the same list.
+- **Styles** saves the current look under a name, with or without its motion, and applies a saved
+  one to the whole text or to the selection. Saved styles are stored with the plugin, so they are
+  there in every scene collection, and also appear in the properties dialog.
+- **Motion** is a grid of presets (hover one to try it on your text), when to play it, what moves
+  together, and one speed slider; the exact timings are under *Fine-tune*.
+
+The text is typed in a plain box under the preview instead when typing on it cannot work: with
+markup on, when the text scrolls, when it comes from a file, and where OBS cannot draw a preview
+into the window (Wayland). **Text box** shows that box at any other time too.
+
+With the editor available, the properties dialog keeps only what is quick to change there: the
+text, the font, the colour, a saved style, and the timer buttons when the text uses the timer. A
+build without Qt has no editor, and its dialog shows every setting.
+
 ## Styling model
 
-A source has a **base style** — what the properties dialog shows — and text can override any part
-of it per character. Changing the base reaches every character except the ones styled differently,
-the way CSS cascades.
+A source has a **base style** and text can override any part of it per character. Changing the base
+reaches every character except the ones styled differently, the way CSS cascades.
 
 In the editor:
 
 - **With text selected**, a control changes just the selection.
 - **With nothing selected**, a control changes the base style, and the whole text takes it.
 - Each control changes only its own setting: changing the colour never resets a word you made
-  bigger. **Clear formatting** returns a selection to the base style.
-- Paragraph settings (alignment, direction, line height, spacing) apply to the paragraphs the
-  selection touches, or to all of them.
-
-The text box shows the styling — weight, slant, underline, colour, outline, relative size — so you
-can see what is styled where. Every change applies immediately and can be undone from OBS's
-**Edit → Undo**.
+  bigger. **Match the rest of the text** returns a selection to the base style.
+- Paragraph settings (alignment, line height) apply to the paragraphs the selection touches, or to
+  all of them.
 
 Scripts, obs-websocket and tools like Streamer.bot drive a Slugged source exactly like a GDI+ one:
 the plain `text` property is always the text. When something sets it, Slugged changes only the part
@@ -63,7 +94,7 @@ styled `Score:` keeps its style.
 
 ### Markup
 
-Turn on **Inline markup** and the text itself carries styling, for when a bot or script sets it:
+Turn on **Inline markup** (under **More** in the editor) and the text itself carries styling, for when a bot or script sets it:
 
 ```
 [b]New follower:[/b] [color=#ffcc00]{follower}[/color]
@@ -91,8 +122,9 @@ out of OBS, and the built-ins.
 Digits are fixed-width by default, so a clock or counter does not jitter sideways as it changes.
 
 **The timer.** Every source has a stopwatch behind `{timer}` and `{countdown:…}`. It starts running
-when the source is created; start, pause and reset it from the properties dialog, the editor, a
-hotkey, or the `timer_start`, `timer_pause`, `timer_toggle` and `timer_reset` procs.
+when the source is created; start, pause and reset it from under the editor's preview, the
+properties dialog, a hotkey, or the `timer_start`, `timer_pause`, `timer_toggle` and `timer_reset`
+procs.
 
 **Variables from a script or bot.** Every Slugged source has `set_variable`, `clear_variables` and
 `replay_motion` procs, and OBS's own proc handler gains `slugged_set_variable`,
@@ -123,26 +155,26 @@ preset is when it plays. **Play** decides:
 - **When the source goes live** — on the program output. The right choice for intros in Studio Mode.
 - **On a loop**, or **only when the settings change**.
 
-There is also a **Play now** button and a hotkey.
+There is also a **Play motion** button under the editor's preview, and a hotkey.
 
-The **Amount** control is labelled and ranged for the preset it belongs to — a travel distance for
-slide and bounce, a starting scale for pop, an angle for spin, a blur width for blur, a height for
-wave.
+The **Amount** control, under *Fine-tune*, is labelled and ranged for the preset it belongs to — a
+travel distance for slide and bounce, a starting scale for pop, an angle for spin, a blur width for
+blur, a height for wave.
 
 ## Scrolling
 
-**Scroll continuously** moves the text through the source's box: negative horizontal speeds move
-left, so text enters from the right edge. With **Repeat** on it loops seamlessly with a gap; off, it
-crosses once, and again whenever the source is shown or the motion is played by the button, hotkey
-or proc. A horizontal ticker never wraps, and text outside the box
-is clipped. An auto-sized source scrolls through its own bounds; turn on **Use a fixed size** for a
-ticker bar of a set width.
+**Scroll like a ticker** (under **Motion**) moves the text through the source's box: negative
+horizontal speeds move left, so text enters from the right edge. With **Repeat** on it loops
+seamlessly with a gap; off, it crosses once, and again whenever the source is shown or the motion is
+played by the button, hotkey or proc. A horizontal ticker never wraps, and text outside the box is
+clipped. An auto-sized source scrolls through its own bounds; choose **Fixed box** under **Layout**
+for a ticker bar of a set width.
 
 ## Alignment and size
 
 An auto-sized source grows to fit its text, outline, shadow and any italic overhang, so nothing is
 cut off. Alignment positions lines within the text block: on a single line of an auto-sized source
-there is nothing to align within, so turn on **Use a fixed size** (and give it a height for vertical
+there is nothing to align within, so choose **Fixed box** (and give it a height for vertical
 alignment). The overlay filter lays out against the source it sits on, so it always has a box.
 **Start** and **End** follow the text's direction: Start is the right edge for Arabic or Hebrew.
 
@@ -197,6 +229,8 @@ Settings (schema 2)  → SourceConfig snapshot             obs/settings.cpp
   → Shaper           HarfBuzz + SheenBidi + fallback     text/shaper.cpp
   → Layout           logical line breaking, per-line     text/layout.cpp
                      bidi reordering, alignment
+  → EditMap          where the text sits, for typing     text/edit_map.cpp
+                     on the preview (editor open only)
   → ShapeCache       outlines, strokes, COLR, bitmaps    render/shape_cache.cpp
   → AtlasCache       slughorn atlas per source           render/atlas_cache.cpp
   → Geometry         layered quads with knock-outs       render/geometry.cpp

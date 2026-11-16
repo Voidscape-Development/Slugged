@@ -296,7 +296,7 @@ TokenContext::Origin TokenContext::lookup(const std::string &name, const std::st
 	return builtin(name, arg, out) ? Origin::Live : Origin::None;
 }
 
-std::string TokenContext::expandImpl(const std::string &text, bool liveToo) const
+std::string TokenContext::expandImpl(const std::string &text, bool liveToo, std::vector<TokenSpan> *spans) const
 {
 	std::string out;
 	out.reserve(text.size());
@@ -311,6 +311,10 @@ std::string TokenContext::expandImpl(const std::string &text, bool liveToo) cons
 
 		// "{{" is an escape for a literal brace.
 		if (i + 1 < text.size() && text[i + 1] == '{') {
+			if (spans)
+				spans->push_back(TokenSpan{uint32_t(i), uint32_t(i + 2), uint32_t(out.size()),
+							   uint32_t(out.size() + 1)});
+
 			out += '{';
 			i += 2;
 			continue;
@@ -335,9 +339,13 @@ std::string TokenContext::expandImpl(const std::string &text, bool liveToo) cons
 		std::string value;
 		const Origin origin = name.empty() ? Origin::None : lookup(name, arg, value);
 
-		if (origin == Origin::Content || (origin == Origin::Live && liveToo))
+		if (origin == Origin::Content || (origin == Origin::Live && liveToo)) {
+			if (spans)
+				spans->push_back(TokenSpan{uint32_t(i), uint32_t(close + 1), uint32_t(out.size()),
+							   uint32_t(out.size() + value.size())});
+
 			out += value;
-		else
+		} else
 			out += text.substr(i, close - i + 1);
 
 		i = close + 1;
@@ -348,12 +356,17 @@ std::string TokenContext::expandImpl(const std::string &text, bool liveToo) cons
 
 std::string TokenContext::expand(const std::string &text) const
 {
-	return expandImpl(text, true);
+	return expandImpl(text, true, nullptr);
+}
+
+std::string TokenContext::expand(const std::string &text, std::vector<TokenSpan> &spans) const
+{
+	return expandImpl(text, true, &spans);
 }
 
 std::string TokenContext::expandContent(const std::string &text) const
 {
-	return expandImpl(text, false);
+	return expandImpl(text, false, nullptr);
 }
 
 } // namespace slugged

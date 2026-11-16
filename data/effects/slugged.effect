@@ -128,7 +128,7 @@ struct VertIn {
 	float4 bBand     : TEXCOORD3;
 	float4 bShape    : TEXCOORD4;
 	float4 color     : TEXCOORD5;
-	float4 color2    : TEXCOORD6;
+	float4 endColor  : TEXCOORD6;
 	float4 fx        : TEXCOORD7;
 	float4 pivot     : TEXCOORD8;
 	float4 motion    : TEXCOORD9;
@@ -143,10 +143,10 @@ struct VertOut {
 	float4 bBand     : TEXCOORD3;
 	float4 bShape    : TEXCOORD4;
 	float4 color     : TEXCOORD5;
-	float4 color2    : TEXCOORD6;
+	float4 endColor  : TEXCOORD6;
 	float4 grad      : TEXCOORD7;
 	float4 misc      : TEXCOORD8; /* fade, blur, code, knock A */
-	float4 misc2     : TEXCOORD9; /* knock B */
+	float4 knock     : TEXCOORD9; /* knock B */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -476,10 +476,10 @@ VertOut VSSlug(VertIn v)
 	o.bBand     = v.bBand;
 	o.bShape    = v.bShape;
 	o.color     = v.color;
-	o.color2    = v.color2;
+	o.endColor    = v.endColor;
 	o.grad      = v.grad;
 	o.misc      = float4(fade, blur, v.em.z, v.em.w);
-	o.misc2     = float4(v.motion.w, 0.0, 0.0, 0.0);
+	o.knock     = float4(v.motion.w, 0.0, 0.0, 0.0);
 
 	return o;
 }
@@ -508,7 +508,7 @@ float4 PSSlug(VertOut f) : TARGET
 	float blur  = f.misc.y;
 	float code  = f.misc.z;
 	float knockA = f.misc.w;
-	float knockB = f.misc2.x;
+	float knockB = f.knock.x;
 
 	float gradType = floor(code / 8.0 + 0.01);
 	float kind = code - gradType * 8.0;
@@ -526,7 +526,7 @@ float4 PSSlug(VertOut f) : TARGET
 	if (gradType > 0.5) {
 		float t = gradType < 1.5 ? f.grad.x : length(f.grad.xy);
 
-		color = lerp(f.color, f.color2, clamp(t, 0.0, 1.0));
+		color = lerp(f.color, f.endColor, clamp(t, 0.0, 1.0));
 	}
 
 	float coverage = 1.0;
@@ -541,11 +541,11 @@ float4 PSSlug(VertOut f) : TARGET
 	} else if (kind < KIND_SHADOW + 0.5) {
 		float2 glyph = em + f.grad.zw;
 
-		float cast = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
+		float shadowCoverage = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
 		float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
 				    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
 
-		coverage = cast * (1.0 - inFront);
+		coverage = shadowCoverage * (1.0 - inFront);
 	} else if (kind < KIND_SOLID + 0.5) {
 		coverage = 1.0;
 	} else if (kind < KIND_IMAGE + 0.5) {

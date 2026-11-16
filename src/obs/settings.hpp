@@ -93,6 +93,17 @@ void saveContent(obs_data_t *data, const Document &doc);
 // empty paragraph when there is none.
 void contentFromData(obs_data_t *data, Document &doc);
 
+// A style, a motion or a background on its own, as an object rather than as a
+// source's settings. Saved styles are stored this way.
+void styleToData(obs_data_t *obj, const Style &style);
+Style styleFromData(obs_data_t *obj);
+
+void motionToData(obs_data_t *obj, const MotionSpec &motion, const ScrollSpec &scroll);
+void motionFromData(obs_data_t *obj, MotionSpec &motion, ScrollSpec &scroll);
+
+void backgroundToData(obs_data_t *obj, const Background &background, float padding);
+void backgroundFromData(obs_data_t *obj, Background &background, float &padding);
+
 // The per-source variable table: an editable list of "name=value" strings, so
 // obs-websocket, Streamer.bot and a two-line script can all write it.
 extern const char *const kVariablesKey;

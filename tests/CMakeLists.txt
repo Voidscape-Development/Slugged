@@ -56,6 +56,7 @@ add_executable(
   "${SLUGGED_ROOT}/src/core/text_feed.cpp"
   "${SLUGGED_ROOT}/src/core/tokens.cpp"
   "${SLUGGED_ROOT}/src/core/variables.cpp"
+  "${SLUGGED_ROOT}/src/text/edit_map.cpp"
   "${SLUGGED_ROOT}/src/text/font_enum.cpp"
   "${SLUGGED_ROOT}/src/text/font_manager.cpp"
   "${SLUGGED_ROOT}/src/text/layout.cpp"

@@ -31,6 +31,9 @@ class ColorButton : public QPushButton {
 public:
 	explicit ColorButton(QWidget *parent = nullptr);
 
+	// Text shown beside the swatch, in place of the colour's opacity.
+	void setCaption(const QString &caption);
+
 	void setColor(const Rgba &color);
 	Rgba color() const { return _color; }
 
@@ -42,6 +45,7 @@ private:
 	void pick();
 
 	Rgba _color;
+	QString _caption;
 };
 
 } // namespace slugged

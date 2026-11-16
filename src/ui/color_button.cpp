@@ -19,16 +19,24 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "color_button.hpp"
 
 #include <QColorDialog>
+#include <QPainter>
+#include <QPixmap>
 
 namespace slugged {
 
 ColorButton::ColorButton(QWidget *parent) : QPushButton(parent)
 {
-	setAutoFillBackground(true);
-	setFlat(true);
-	setMinimumWidth(72);
+	setObjectName("colorButton");
+	setIconSize(QSize(20, 20));
 
 	connect(this, &QPushButton::clicked, this, &ColorButton::pick);
+
+	refresh();
+}
+
+void ColorButton::setCaption(const QString &caption)
+{
+	_caption = caption;
 
 	refresh();
 }
@@ -42,22 +50,33 @@ void ColorButton::setColor(const Rgba &color)
 
 void ColorButton::refresh()
 {
-	const int r = int(_color.r * 255.0f + 0.5f);
-	const int g = int(_color.g * 255.0f + 0.5f);
-	const int b = int(_color.b * 255.0f + 0.5f);
+	// The swatch is the icon, so the button itself keeps the editor's look.
+	const qreal ratio = devicePixelRatioF();
 
-	// Pick a readable label colour from the swatch's own luminance.
-	const float luma = 0.2126f * _color.r + 0.7152f * _color.g + 0.0722f * _color.b;
-	const char *text = luma > 0.55f ? "#000000" : "#FFFFFF";
+	QPixmap swatch(QSize(20, 20) * ratio);
+	swatch.setDevicePixelRatio(ratio);
+	swatch.fill(Qt::transparent);
 
-	setStyleSheet(QString("QPushButton { background-color: rgb(%1,%2,%3); color: %4; "
-			      "border: 1px solid palette(mid); padding: 4px; }")
-			      .arg(r)
-			      .arg(g)
-			      .arg(b)
-			      .arg(text));
+	QColor fill;
+	fill.setRgbF(qreal(_color.r), qreal(_color.g), qreal(_color.b), 1.0);
 
-	setText(QString("%1%").arg(int(_color.a * 100.0f + 0.5f)));
+	QPainter painter(&swatch);
+	painter.setRenderHint(QPainter::Antialiasing);
+	painter.setPen(QPen(QColor(0x55, 0x5b, 0x6b), 1.0));
+	painter.setBrush(fill);
+	painter.drawRoundedRect(QRectF(0.5, 0.5, 19.0, 19.0), 5.0, 5.0);
+	painter.end();
+
+	setIcon(QIcon(swatch));
+
+	const int opacity = int(_color.a * 100.0f + 0.5f);
+
+	if (_caption.isEmpty())
+		setText(QString("%1%").arg(opacity));
+	else if (opacity < 100)
+		setText(QString("%1 %2%").arg(_caption).arg(opacity));
+	else
+		setText(_caption);
 }
 
 void ColorButton::pick()
