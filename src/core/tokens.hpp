@@ -49,6 +49,11 @@ namespace slugged {
 //
 // Expansion is non-recursive: a value containing braces is inserted literally,
 // so no input can produce an infinite loop.
+//
+// A token may be followed by filters, each introduced by a bar, that reshape
+// its value: {followers|number}, {name|upper|truncate:12}, {timer|mm:ss},
+// {message|default:Nothing yet}. See applyFilter() for the list. A token with
+// no value stays as written unless a `default` filter supplies one.
 // Where one replaced token came from and went to: [srcStart, srcEnd) in the
 // text as written, [dstStart, dstEnd) in the expanded text. The editor uses
 // these to treat a live value on the canvas as the one token it stands for.
@@ -68,6 +73,11 @@ public:
 	void set(const std::string &name, const std::string &value);
 	void erase(const std::string &name);
 	void clearRuntime() { _runtime.clear(); }
+
+	// Where a name's value comes from, among the tables a script or the user
+	// can write. Live values (host and built-ins) are not reported.
+	enum class Layer { None, Runtime, Source, File, Global };
+	Layer find(const std::string &name, std::string &value) const;
 
 	// Replace a whole table. Returns true when the contents changed.
 	bool setSourceVariables(const VariableMap &values);
@@ -116,6 +126,25 @@ private:
 	float _timer = 0.0f;
 	std::time_t _clock = 0;
 };
+
+// Applies one filter ("upper", "pad:3") to a token's value. Unknown filters
+// leave the value as it was. `default` is handled by the caller, because it
+// also applies when there is no value at all.
+std::string applyFilter(const std::string &value, const std::string &filter);
+
+// The text `to` with every number that differs from the one at the same place
+// in `from` part of the way there: at `t` = 0 it reads as `from`, at 1 as
+// `to`. Each number keeps `to`'s formatting (decimals, thousands separators).
+// Returns false when the two do not have the same words around the same count
+// of numbers, so there is nothing sensible to count through.
+bool interpolateNumbers(const std::string &from, const std::string &to, double t, std::string &out);
+
+// A number as plain text: no exponent and no trailing zeros ("12", "0.5").
+std::string formatPlainNumber(double value);
+
+// Reads a number written the way an overlay shows one: "1234", "-3.5",
+// "1,234,567". Returns false when `text` is anything else.
+bool parseNumber(const std::string &text, double &out);
 
 // "1:05", "1:02:03" -- the format every duration token uses.
 std::string formatDuration(double seconds);

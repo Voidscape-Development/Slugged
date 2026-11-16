@@ -52,6 +52,27 @@ constexpr int kSchemaVersion = 2;
 // Where a source's text comes from.
 enum class SourceMode { Text, File };
 
+} // namespace settings
+
+// How the overlay filter combines its text with the source it sits on.
+enum class FilterMode {
+	// Text drawn over the source.
+	Overlay,
+	// Only the source's picture inside the letters shows.
+	Mask,
+	// The letters are cut out of the source, leaving holes.
+	Knockout,
+};
+SLUGGED_ENUM_TRAITS(FilterMode, {FilterMode::Overlay, "overlay"}, {FilterMode::Mask, "mask"},
+		    {FilterMode::Knockout, "knockout"})
+
+namespace settings {
+
+// The variable the counter hotkeys and procs step when none is named.
+extern const char *const kCounterVariableKey;
+extern const char *const kCounterStepKey;
+extern const char *const kFilterModeKey;
+
 // Everything update() reads, resolved into one immutable value.
 struct SourceConfig {
 	Document document;
@@ -65,6 +86,12 @@ struct SourceConfig {
 	TextFeed::Config variablesFile;
 
 	VariableMap variables;
+
+	// What the counter hotkeys change, and by how much.
+	std::string counterVariable = "count";
+	double counterStep = 1.0;
+
+	FilterMode filterMode = FilterMode::Overlay;
 
 	// True when `text` had been changed from outside and the content was
 	// brought in line with it, so the caller can store the updated content.

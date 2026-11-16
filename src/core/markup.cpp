@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <vector>
 
 namespace slugged {
 
@@ -107,6 +108,70 @@ std::optional<OpenTag> parseTag(const std::string &body)
 				return std::nullopt;
 
 			tag.delta.outlineColor = *color;
+		}
+	} else if (name == "glow") {
+		tag.delta.glow = true;
+
+		if (!value.empty()) {
+			const auto color = parseColor(value);
+
+			if (!color)
+				return std::nullopt;
+
+			tag.delta.glowColor = *color;
+		}
+	} else if (name == "gradient") {
+		// [gradient=#f00,#ff0,#0f0]: a left-to-right gradient through every
+		// colour listed.
+		std::vector<std::string> colors;
+		std::string current;
+
+		for (char c : value + ",") {
+			if (c == ',' || c == ' ') {
+				if (!current.empty())
+					colors.push_back(current);
+
+				current.clear();
+			} else {
+				current += c;
+			}
+		}
+
+		if (colors.size() < 2)
+			return std::nullopt;
+
+		for (const std::string &color : colors)
+			if (!parseColor(color))
+				return std::nullopt;
+
+		std::string stops;
+
+		for (size_t i = 1; i + 1 < colors.size(); i++)
+			stops += (stops.empty() ? "" : " ") + colors[i];
+
+		tag.delta.fillType = FillType::Linear;
+		tag.delta.gradientAngle = 0.0f;
+		tag.delta.color = *parseColor(colors.front());
+		tag.delta.color2 = *parseColor(colors.back());
+		tag.delta.gradientStops = stops;
+	} else if (name == "effect" || enumFromString(name.c_str(), Effect::None) != Effect::None) {
+		// [shake]...[/shake], [shake=2] for twice as strong, or
+		// [effect=shake]...[/effect].
+		const std::string kind = name == "effect" ? lower(value) : name;
+		const Effect effect = enumFromString(kind.c_str(), Effect::None);
+
+		if (effect == Effect::None && kind != "none")
+			return std::nullopt;
+
+		tag.delta.effect = effect;
+
+		if (name != "effect" && !value.empty()) {
+			const auto strength = parseNumber(value);
+
+			if (!strength || *strength < 0.0f)
+				return std::nullopt;
+
+			tag.delta.effectStrength = *strength;
 		}
 	} else {
 		return std::nullopt;

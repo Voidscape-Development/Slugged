@@ -30,11 +30,15 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
+#include <vector>
 
+#include <graphics/vec4.h>
 #include <obs-module.h>
 
 namespace slugged {
@@ -87,6 +91,7 @@ struct SluggedSource {
 	std::atomic<bool> timerRunning{true};
 	std::atomic<bool> timerResetRequested{false};
 	std::atomic<bool> replayRequested{false};
+	std::atomic<bool> nextMessageRequested{false};
 
 	std::atomic<uint32_t> width{0};
 	std::atomic<uint32_t> height{0};
@@ -101,6 +106,10 @@ struct SluggedSource {
 	obs_hotkey_id replayHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id timerToggleHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id timerResetHotkey = OBS_INVALID_HOTKEY_ID;
+	obs_hotkey_id counterUpHotkey = OBS_INVALID_HOTKEY_ID;
+	obs_hotkey_id counterDownHotkey = OBS_INVALID_HOTKEY_ID;
+	obs_hotkey_id counterResetHotkey = OBS_INVALID_HOTKEY_ID;
+	obs_hotkey_id nextMessageHotkey = OBS_INVALID_HOTKEY_ID;
 
 	// ---- graphics thread -------------------------------------------------
 
@@ -112,10 +121,38 @@ struct SluggedSource {
 	uint64_t hostGeneration = 0;
 
 	// The document as authored -- file contents or markup applied, tokens not
-	// yet expanded -- and its plain text.
+	// yet expanded -- and what of it is shown: all of it, or one line when the
+	// lines take turns.
+	Document full;
 	Document authored;
 	std::string authoredPlain;
 	bool authoredValid = false;
+
+	// Taking turns: which line is up, and for how long it has been.
+	bool rotating = false;
+	size_t rotateIndex = 0;
+	float rotateClock = 0.0f;
+	bool rotateAdvanced = false;
+	std::minstd_rand rotateRandom{std::random_device{}()};
+
+	// Counting a number up to its new value: the text being counted from, the
+	// content that started it, and how far along it is.
+	bool counting = false;
+	std::string countFrom;
+	std::string countContent;
+	float countClock = 0.0f;
+	std::string shownText;
+
+	// The effects' clock, which nothing resets.
+	float loopTime = 0.0f;
+
+	// Text filled with another source's picture: which source, rendered into
+	// a texture each frame it is needed.
+	std::string fillName;
+	obs_weak_source_t *fillSource = nullptr;
+	gs_texrender_t *fillRender = nullptr;
+	gs_texrender_t *filterRender = nullptr;
+	bool renderingFill = false;
 
 	std::string lastExpanded;
 	std::string lastContent;
@@ -212,6 +249,60 @@ float passDuration(const MotionSpec &motion, uint32_t units)
 	return motion.passDuration(units) + 0.25f;
 }
 
+// Whether anything in `doc` is filled with another source's picture.
+bool usesSourceFill(const Document &doc)
+{
+	if (doc.fillSource.empty())
+		return false;
+
+	if (doc.base.fill.type == FillType::Source)
+		return true;
+
+	for (const Block &block : doc.blocks)
+		for (const Run &run : block.runs)
+			if (run.style.fillType && *run.style.fillType == FillType::Source)
+				return true;
+
+	return false;
+}
+
+// Points the source fill at the source called `name`, or at nothing. A source
+// used as a fill is kept "showing", so a media source plays while it shows
+// through the letters even when no scene shows it.
+void bindFillSource(SluggedSource *ctx, const std::string &name)
+{
+	if (name == ctx->fillName && (ctx->fillSource || name.empty()))
+		return;
+
+	if (ctx->fillSource) {
+		if (obs_source_t *old = obs_weak_source_get_source(ctx->fillSource)) {
+			obs_source_dec_showing(old);
+			obs_source_release(old);
+		}
+
+		obs_weak_source_release(ctx->fillSource);
+		ctx->fillSource = nullptr;
+	}
+
+	ctx->fillName = name;
+
+	if (name.empty())
+		return;
+
+	obs_source_t *source = obs_get_source_by_name(name.c_str());
+
+	if (!source)
+		return;
+
+	// A source cannot fill itself, nor be filled by a scene showing it.
+	if (source != ctx->source) {
+		ctx->fillSource = obs_source_get_weak_source(source);
+		obs_source_inc_showing(source);
+	}
+
+	obs_source_release(source);
+}
+
 // ---- settings ----------------------------------------------------------------
 
 void updateSource(void *data, obs_data_t *settingsData)
@@ -272,6 +363,132 @@ void clearVariablesProc(void *data, calldata_t *)
 	ctx->tokens.clearRuntime();
 }
 
+// Steps a numeric variable: the counter behind a death counter or a score.
+// The value is changed where it lives, so it lasts as long as that place does:
+// a value a script set stays a script value, a shared one stays shared, and
+// anything else is kept in the source's own variables list, which is saved with
+// the scene collection.
+void stepVariable(SluggedSource *ctx, std::string name, double delta, bool reset)
+{
+	const auto config = configOf(ctx);
+
+	if (name.empty())
+		name = config ? config->counterVariable : "count";
+
+	name = normaliseVariableName(name);
+
+	if (name.empty())
+		return;
+
+	std::string current;
+	TokenContext::Layer layer;
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		layer = ctx->tokens.find(name, current);
+	}
+
+	double value = 0.0;
+	parseNumber(current, value);
+
+	const std::string next = formatPlainNumber(reset ? 0.0 : value + delta);
+
+	switch (layer) {
+	case TokenContext::Layer::Runtime:
+	case TokenContext::Layer::File: {
+		// A file cannot be written back; a script value wins over it.
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		ctx->tokens.set(name, next);
+		return;
+	}
+	case TokenContext::Layer::Global:
+		GlobalVariables::set(name, next);
+		return;
+	case TokenContext::Layer::Source:
+	case TokenContext::Layer::None:
+		break;
+	}
+
+	obs_data_t *data = obs_source_get_settings(ctx->source);
+
+	if (!data)
+		return;
+
+	VariableMap values = settings::variablesFromData(data, settings::kVariablesKey);
+	values[name] = next;
+	settings::variablesToData(data, settings::kVariablesKey, values);
+
+	obs_source_update(ctx->source, data);
+	obs_data_release(data);
+}
+
+double stepOf(SluggedSource *ctx, calldata_t *call)
+{
+	double amount = 0.0;
+
+	if (call && calldata_get_float(call, "amount", &amount) && amount != 0.0)
+		return amount;
+
+	const auto config = configOf(ctx);
+
+	return config && config->counterStep != 0.0 ? config->counterStep : 1.0;
+}
+
+std::string nameOf(calldata_t *call)
+{
+	const char *name = nullptr;
+
+	return call && calldata_get_string(call, "name", &name) && name ? name : "";
+}
+
+void incrementProc(void *data, calldata_t *call)
+{
+	auto *ctx = static_cast<SluggedSource *>(data);
+
+	stepVariable(ctx, nameOf(call), stepOf(ctx, call), false);
+}
+
+void decrementProc(void *data, calldata_t *call)
+{
+	auto *ctx = static_cast<SluggedSource *>(data);
+
+	stepVariable(ctx, nameOf(call), -stepOf(ctx, call), false);
+}
+
+void resetVariableProc(void *data, calldata_t *call)
+{
+	stepVariable(static_cast<SluggedSource *>(data), nameOf(call), 0.0, true);
+}
+
+void getVariableProc(void *data, calldata_t *call)
+{
+	auto *ctx = static_cast<SluggedSource *>(data);
+	const std::string name = nameOf(call);
+
+	std::string value;
+
+	{
+		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+		// Anything a token could say: a variable, or a live value.
+		if (ctx->tokens.find(name, value) == TokenContext::Layer::None) {
+			const std::string token = "{" + name + "}";
+			const std::string expanded = ctx->tokens.expand(token);
+
+			value = expanded == token ? std::string() : expanded;
+		}
+	}
+
+	calldata_set_string(call, "value", value.c_str());
+}
+
+void nextMessageProc(void *data, calldata_t *)
+{
+	static_cast<SluggedSource *>(data)->nextMessageRequested = true;
+}
+
 void replayProc(void *data, calldata_t *)
 {
 	static_cast<SluggedSource *>(data)->replayRequested = true;
@@ -317,6 +534,30 @@ void timerResetHotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
 		timerResetProc(data, nullptr);
 }
 
+void counterUpHotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		incrementProc(data, nullptr);
+}
+
+void counterDownHotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		decrementProc(data, nullptr);
+}
+
+void counterResetHotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		resetVariableProc(data, nullptr);
+}
+
+void nextMessageHotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (pressed)
+		nextMessageProc(data, nullptr);
+}
+
 // ---- lifecycle ---------------------------------------------------------------
 
 void *createSource(obs_data_t *settingsData, obs_source_t *source, bool isFilter)
@@ -336,6 +577,11 @@ void *createSource(obs_data_t *settingsData, obs_source_t *source, bool isFilter
 		proc_handler_add(procs, "void timer_pause()", timerPauseProc, ctx);
 		proc_handler_add(procs, "void timer_toggle()", timerToggleProc, ctx);
 		proc_handler_add(procs, "void timer_reset()", timerResetProc, ctx);
+		proc_handler_add(procs, "void get_variable(in string name, out string value)", getVariableProc, ctx);
+		proc_handler_add(procs, "void increment_variable(string name, float amount)", incrementProc, ctx);
+		proc_handler_add(procs, "void decrement_variable(string name, float amount)", decrementProc, ctx);
+		proc_handler_add(procs, "void reset_variable(string name)", resetVariableProc, ctx);
+		proc_handler_add(procs, "void next_message()", nextMessageProc, ctx);
 	}
 
 	ctx->replayHotkey = obs_hotkey_register_source(source, "Slugged.Replay", obs_module_text("Hotkey.Replay"),
@@ -344,6 +590,14 @@ void *createSource(obs_data_t *settingsData, obs_source_t *source, bool isFilter
 		source, "Slugged.TimerToggle", obs_module_text("Hotkey.TimerToggle"), timerToggleHotkey, ctx);
 	ctx->timerResetHotkey = obs_hotkey_register_source(source, "Slugged.TimerReset",
 							   obs_module_text("Hotkey.TimerReset"), timerResetHotkey, ctx);
+	ctx->counterUpHotkey = obs_hotkey_register_source(source, "Slugged.CounterUp",
+							  obs_module_text("Hotkey.CounterUp"), counterUpHotkey, ctx);
+	ctx->counterDownHotkey = obs_hotkey_register_source(
+		source, "Slugged.CounterDown", obs_module_text("Hotkey.CounterDown"), counterDownHotkey, ctx);
+	ctx->counterResetHotkey = obs_hotkey_register_source(
+		source, "Slugged.CounterReset", obs_module_text("Hotkey.CounterReset"), counterResetHotkey, ctx);
+	ctx->nextMessageHotkey = obs_hotkey_register_source(
+		source, "Slugged.NextMessage", obs_module_text("Hotkey.NextMessage"), nextMessageHotkey, ctx);
 
 	return ctx;
 }
@@ -365,7 +619,8 @@ void destroySource(void *data)
 	// The editor holds this source; close it before the state goes away.
 	editor::closeFor(ctx->source);
 
-	for (obs_hotkey_id id : {ctx->replayHotkey, ctx->timerToggleHotkey, ctx->timerResetHotkey})
+	for (obs_hotkey_id id : {ctx->replayHotkey, ctx->timerToggleHotkey, ctx->timerResetHotkey, ctx->counterUpHotkey,
+				 ctx->counterDownHotkey, ctx->counterResetHotkey, ctx->nextMessageHotkey})
 		if (id != OBS_INVALID_HOTKEY_ID)
 			obs_hotkey_unregister(id);
 
@@ -377,8 +632,17 @@ void destroySource(void *data)
 		ctx->job->ready.reset();
 	}
 
+	bindFillSource(ctx, std::string());
+
 	obs_enter_graphics();
 	ctx->renderer.release();
+
+	if (ctx->fillRender)
+		gs_texrender_destroy(ctx->fillRender);
+
+	if (ctx->filterRender)
+		gs_texrender_destroy(ctx->filterRender);
+
 	obs_leave_graphics();
 
 	delete ctx;
@@ -396,10 +660,69 @@ uint32_t getHeight(void *data)
 
 // ---- tick --------------------------------------------------------------------
 
-// Rebuilds `authored` from the config and, in file mode, the file's contents.
+// The lines that take turns: every paragraph with something in it.
+std::vector<size_t> messageLines(const Document &doc)
+{
+	std::vector<size_t> lines;
+
+	for (size_t i = 0; i < doc.blocks.size(); i++)
+		if (doc.blocks[i].plainText().find_first_not_of(" \t\r") != std::string::npos)
+			lines.push_back(i);
+
+	return lines;
+}
+
+// Whether the lines take turns right now. An open editor shows them all, so
+// every line can be edited where it is.
+bool wantsRotation(SluggedSource *ctx)
+{
+	return ctx->full.rotate.enabled && !ctx->editorAttached && messageLines(ctx->full).size() > 1;
+}
+
+// Sets `authored` to what is shown of `full`: all of it, or the line whose
+// turn it is.
+void selectShown(SluggedSource *ctx)
+{
+	ctx->authored = ctx->full;
+	ctx->rotating = wantsRotation(ctx);
+
+	if (ctx->rotating) {
+		const std::vector<size_t> lines = messageLines(ctx->full);
+
+		ctx->rotateIndex %= lines.size();
+		ctx->authored.blocks = {ctx->full.blocks[lines[ctx->rotateIndex]]};
+	}
+
+	ctx->authoredPlain = ctx->authored.plainText();
+	ctx->authoredValid = true;
+}
+
+// Moves on to the next line, or a random other one when shuffling.
+void advanceMessage(SluggedSource *ctx)
+{
+	const size_t count = messageLines(ctx->full).size();
+
+	if (count < 2)
+		return;
+
+	if (ctx->full.rotate.shuffle) {
+		std::uniform_int_distribution<size_t> pick(1, count - 1);
+		ctx->rotateIndex = (ctx->rotateIndex + pick(ctx->rotateRandom)) % count;
+	} else {
+		ctx->rotateIndex = (ctx->rotateIndex + 1) % count;
+	}
+
+	ctx->rotateClock = 0.0f;
+	ctx->rotateAdvanced = true;
+
+	selectShown(ctx);
+}
+
+// Rebuilds `full` from the config and, in file mode, the file's contents, and
+// from it `authored`.
 void refreshAuthored(SluggedSource *ctx, const SourceConfig &config)
 {
-	ctx->authored = config.document;
+	ctx->full = config.document;
 
 	if (config.mode == settings::SourceMode::File) {
 		const std::string &text = ctx->feed.text();
@@ -408,20 +731,24 @@ void refreshAuthored(SluggedSource *ctx, const SourceConfig &config)
 		// minimal edit a script's would, so styling the first line of a
 		// template keeps applying to whatever the file says there.
 		if (config.markup)
-			ctx->authored.blocks = parseMarkup(text);
+			ctx->full.blocks = parseMarkup(text);
 		else
-			ctx->authored.setPlainText(text);
+			ctx->full.setPlainText(text);
 	}
 
-	ctx->authoredPlain = ctx->authored.plainText();
-	ctx->authoredValid = true;
+	selectShown(ctx);
 }
 
+// `expanded` is the text as it will be shown: tokens expanded, and any number
+// that is counting up part of the way there.
 void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::string &content)
 {
 	const MotionSpec &motion = ctx->authored.motion;
 
 	const uint64_t id = ctx->nextFrameId++;
+
+	const bool rotated = ctx->rotateAdvanced;
+	ctx->rotateAdvanced = false;
 
 	if (!ctx->built) {
 		// The first text a source shows plays its intro.
@@ -429,6 +756,13 @@ void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::s
 		ctx->replayChangedOnly = false;
 		ctx->replayIsTextChange = false;
 		ctx->animRange = Range{};
+	} else if (rotated && motionIsTransient(motion.motion)) {
+		// The next line taking its turn is a new message, whatever plays the
+		// motion otherwise: all of it comes in, after the last one goes out.
+		ctx->animRange = Range{};
+		ctx->replayOnFrame = id;
+		ctx->replayChangedOnly = false;
+		ctx->replayIsTextChange = true;
 	} else if (content != ctx->lastContent) {
 		ctx->animRange = diffRange(ctx->lastExpanded, expanded);
 
@@ -460,6 +794,11 @@ void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::s
 
 		input.document.expandTokens(ctx->tokens, input.tokenSpans);
 	}
+
+	// A number counting up shows a value no token holds; the minimal edit
+	// keeps the styling of its digits.
+	if (ctx->counting && input.document.plainText() != expanded)
+		input.document.setPlainText(expanded);
 
 	ctx->builtForEditor = input.wantEditMap;
 
@@ -520,6 +859,10 @@ void tickSource(void *data, float seconds)
 	auto *ctx = static_cast<SluggedSource *>(data);
 
 	ctx->uptime += seconds;
+
+	// Wrapped at an hour, which a whole number of cycles of any common speed
+	// divides, so the float keeps the resolution an effect needs.
+	ctx->loopTime = std::fmod(ctx->loopTime + seconds, 3600.0f);
 
 	if (ctx->timerResetRequested.exchange(false))
 		ctx->timer = 0.0f;
@@ -586,6 +929,26 @@ void tickSource(void *data, float seconds)
 		needBuild = true;
 	}
 
+	// ---- lines taking turns ------------------------------------------------
+	if (wantsRotation(ctx) != ctx->rotating) {
+		selectShown(ctx);
+		needBuild = true;
+	}
+
+	if (ctx->rotating) {
+		ctx->rotateClock += seconds;
+
+		if (ctx->nextMessageRequested.exchange(false) || ctx->rotateClock >= ctx->full.rotate.interval) {
+			advanceMessage(ctx);
+			needBuild = true;
+		}
+	} else {
+		ctx->nextMessageRequested = false;
+	}
+
+	// ---- another source's picture ------------------------------------------
+	bindFillSource(ctx, usesSourceFill(ctx->authored) ? ctx->authored.fillSource : std::string());
+
 	// ---- tokens ----------------------------------------------------------
 	std::string expanded;
 	std::string content;
@@ -604,6 +967,40 @@ void tickSource(void *data, float seconds)
 			content = ctx->authoredPlain;
 		}
 	}
+
+	// ---- counting numbers up ----------------------------------------------
+	const MotionSpec &counted = ctx->authored.motion;
+
+	if (counted.countUp && !ctx->editorAttached) {
+		// Only a real change counts; a clock ticking over does not.
+		if (content != ctx->countContent) {
+			std::string probe;
+
+			ctx->counting = ctx->built && interpolateNumbers(ctx->shownText, expanded, 0.0, probe);
+			ctx->countFrom = ctx->shownText;
+			ctx->countClock = 0.0f;
+			ctx->countContent = content;
+		}
+
+		if (ctx->counting) {
+			ctx->countClock += seconds;
+
+			const float t = std::clamp(ctx->countClock / counted.countDuration, 0.0f, 1.0f);
+			const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+
+			std::string shown;
+
+			if (t < 1.0f && interpolateNumbers(ctx->countFrom, expanded, eased, shown))
+				expanded = shown;
+			else
+				ctx->counting = false;
+		}
+	} else {
+		ctx->counting = false;
+		ctx->countContent = content;
+	}
+
+	ctx->shownText = expanded;
 
 	// A clock token changes once a minute, not sixty times a second, so a
 	// rebuild only follows a real difference.
@@ -629,6 +1026,10 @@ void tickSource(void *data, float seconds)
 
 	if (needBuild || !ctx->built)
 		scheduleBuild(ctx, expanded, content);
+
+	// A turn that changed nothing on screen (two identical lines) is not
+	// carried over to whatever changes next.
+	ctx->rotateAdvanced = false;
 
 	applyReadyFrame(ctx);
 
@@ -782,11 +1183,90 @@ void uploadPending(SluggedSource *ctx)
 	ctx->pendingUpload.reset();
 }
 
-void renderText(SluggedSource *ctx)
+// Draws `source` into `render` at its own size, and returns the result.
+gs_texture_t *renderInto(gs_texrender_t *&render, uint32_t width, uint32_t height, const std::function<void()> &draw)
+{
+	if (width == 0 || height == 0)
+		return nullptr;
+
+	if (!render)
+		render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+
+	gs_texrender_reset(render);
+
+	if (!gs_texrender_begin(render, width, height))
+		return nullptr;
+
+	vec4 clear;
+	vec4_zero(&clear);
+	gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+	gs_ortho(0.0f, float(width), 0.0f, float(height), -100.0f, 100.0f);
+
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	draw();
+
+	gs_blend_state_pop();
+	gs_texrender_end(render);
+
+	return gs_texrender_get_texture(render);
+}
+
+// Renders the source the text is filled with, and places its picture over the
+// text so it covers the letters without being stretched out of shape.
+void prepareSourceFill(SluggedSource *ctx, Renderer::DrawParams &params)
+{
+	if (!ctx->fillSource || ctx->renderingFill)
+		return;
+
+	obs_source_t *source = obs_weak_source_get_source(ctx->fillSource);
+
+	if (!source)
+		return;
+
+	const uint32_t width = obs_source_get_width(source);
+	const uint32_t height = obs_source_get_height(source);
+
+	// A source that ends up drawing this one again stops here.
+	ctx->renderingFill = true;
+
+	gs_texture_t *texture =
+		renderInto(ctx->fillRender, width, height, [source]() { obs_source_video_render(source); });
+
+	ctx->renderingFill = false;
+
+	obs_source_release(source);
+
+	if (!texture)
+		return;
+
+	const Metrics &m = ctx->metrics;
+
+	const float x0 = m.contentX0;
+	const float y0 = m.contentY0;
+	const float boxWidth = std::max(m.contentX1 - m.contentX0, 1.0f);
+	const float boxHeight = std::max(m.contentY1 - m.contentY0, 1.0f);
+
+	const float scale = std::max(boxWidth / float(width), boxHeight / float(height));
+	const float w = float(width) * scale;
+	const float h = float(height) * scale;
+
+	params.sourceTexture = texture;
+	params.sourceX0 = x0 + (boxWidth - w) * 0.5f;
+	params.sourceY0 = y0 + (boxHeight - h) * 0.5f;
+	params.sourceX1 = params.sourceX0 + w;
+	params.sourceY1 = params.sourceY0 + h;
+}
+
+// `extra` adds to the draw what the caller already knows: the overlay
+// filter's picture to fill with, or that the text cuts it out.
+void renderText(SluggedSource *ctx, const Renderer::DrawParams *extra = nullptr)
 {
 	if (!ctx->renderer.loadEffect())
 		return;
 
+	ctx->renderer.beginFrame();
 	uploadPending(ctx);
 
 	if (ctx->releaseOutgoing) {
@@ -799,14 +1279,24 @@ void renderText(SluggedSource *ctx)
 
 	Renderer::DrawParams params;
 
+	if (extra)
+		params = *extra;
+	else
+		prepareSourceFill(ctx, params);
+
 	params.elapsed = ctx->animTime;
+	params.motion = doc.motion;
 	params.opacity = doc.opacity;
 	params.scopeChanged = ctx->scopeChanged;
 	params.clip = m.clip;
 	params.clipWidth = m.width;
 	params.clipHeight = m.height;
+	params.loopTime = ctx->loopTime;
+	params.shimmerX0 = m.contentX0;
+	params.shimmerX1 = m.contentX1;
 
-	ctx->renderer.drawBackground(params);
+	if (!params.erase)
+		ctx->renderer.drawBackground(params);
 
 	if (ctx->exitActive && ctx->renderer.hasOutgoing()) {
 		Renderer::DrawParams exit = params;
@@ -875,14 +1365,75 @@ void renderSource(void *data, gs_effect_t *)
 	renderText(static_cast<SluggedSource *>(data));
 }
 
+// Draws a premultiplied texture at (0, 0).
+void drawTexture(gs_texture_t *texture, uint32_t width, uint32_t height)
+{
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+
+	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), texture);
+
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(texture, 0, width, height);
+
+	gs_blend_state_pop();
+}
+
 void renderFilter(void *data, gs_effect_t *)
 {
 	auto *ctx = static_cast<SluggedSource *>(data);
 
-	// Draw what the filter is attached to unchanged, then lay text over it.
-	obs_source_skip_video_filter(ctx->source);
+	const auto config = configOf(ctx);
+	const FilterMode mode = config ? config->filterMode : FilterMode::Overlay;
 
-	renderText(ctx);
+	if (mode == FilterMode::Overlay) {
+		// Draw what the filter is attached to unchanged, then lay text over it.
+		obs_source_skip_video_filter(ctx->source);
+
+		renderText(ctx);
+		return;
+	}
+
+	obs_source_t *target = obs_filter_get_target(ctx->source);
+	const uint32_t width = target ? obs_source_get_width(target) : 0;
+	const uint32_t height = target ? obs_source_get_height(target) : 0;
+
+	if (width == 0 || height == 0) {
+		obs_source_skip_video_filter(ctx->source);
+		return;
+	}
+
+	Renderer::DrawParams extra;
+
+	if (mode == FilterMode::Mask) {
+		// The picture shows only inside the letters: render it aside, and
+		// fill the text with it.
+		gs_texture_t *picture = renderInto(ctx->filterRender, width, height,
+						   [ctx]() { obs_source_skip_video_filter(ctx->source); });
+
+		extra.sourceTexture = picture;
+		extra.sourceX1 = float(width);
+		extra.sourceY1 = float(height);
+		extra.fillAllWithSource = true;
+
+		renderText(ctx, &extra);
+		return;
+	}
+
+	// Knockout: the picture with the letters cut out of it. The cutting has to
+	// happen in a texture of its own, or it would cut through whatever the
+	// scene drew underneath too.
+	extra.erase = true;
+
+	gs_texture_t *cut = renderInto(ctx->filterRender, width, height, [ctx, &extra]() {
+		obs_source_skip_video_filter(ctx->source);
+		renderText(ctx, &extra);
+	});
+
+	if (cut)
+		drawTexture(cut, width, height);
 }
 
 const char *sourceName(void *)

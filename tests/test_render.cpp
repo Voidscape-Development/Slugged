@@ -271,3 +271,194 @@ TEST(worker_builds_only_the_newest_input)
 
 	RebuildWorker::instance().stop();
 }
+
+namespace {
+
+const float *effectOf(const GeometryBuffers &g, size_t vertex)
+{
+	return &g.attributes[GeometryBuffers::Effect][vertex * 4];
+}
+
+} // namespace
+
+TEST(frame_glow_is_a_halo_behind_the_text)
+{
+	if (!haveFonts())
+		return;
+
+	Document plain = docWith("oo");
+	Document glowing = plain;
+	glowing.base.glow.enabled = true;
+	glowing.base.glow.size = 10.0f;
+	glowing.base.glow.color.a = 0.8f;
+
+	FrameState a;
+	FrameState b;
+	const FrameOutput without = build(plain, a);
+	const FrameOutput with = build(glowing, b);
+
+	// The silhouettes go to one halo group, not into the main geometry.
+	CHECK_EQ(countKind(with.geometry, QuadKind::Shadow), size_t(0));
+	CHECK_EQ(with.halos.groups.size(), size_t(1));
+	CHECK_EQ(countKind(with.halos.geometry, QuadKind::Shadow), size_t(2));
+
+	const HaloGroup &group = with.halos.groups[0];
+
+	CHECK_EQ(group.reach, 10.0f);
+	CHECK_EQ(group.gain, 2.0f);
+	CHECK_EQ(group.alphaCap, 0.8f);
+	CHECK_EQ(group.indexCount, 12u);
+
+	// The halo image covers the glyphs and the glow's reach.
+	CHECK(with.haloX0 <= 0.0f && with.haloY0 <= 0.0f);
+	CHECK(with.haloX1 >= float(with.width) && with.haloY1 >= float(with.height));
+
+	// An auto-sized source grows to hold the glow (the line box already held
+	// part of it, beside the letters' ink).
+	CHECK(with.width >= without.width + 10);
+}
+
+TEST(frame_halos_group_by_blur)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("abc");
+	doc.base.glow.enabled = true;
+	doc.base.glow.size = 12.0f;
+	doc.base.shadow.enabled = true;
+	doc.base.shadow.blur = 6.0f;
+
+	StyleOverride bigger;
+	bigger.glowSize = 30.0f;
+	doc.applyStyle(2, 3, bigger);
+
+	FrameState state;
+	const FrameOutput frame = build(doc, state);
+
+	// Glow 12, shadow 6 and glow 30: three blurs, the glow first so it stays
+	// under the shadow.
+	CHECK_EQ(frame.halos.groups.size(), size_t(3));
+	CHECK_EQ(frame.halos.groups[0].reach, 12.0f);
+	CHECK_EQ(frame.halos.groups[0].gain, 2.0f);
+	CHECK_EQ(frame.halos.groups[1].reach, 6.0f);
+	CHECK_EQ(frame.halos.groups[1].gain, 1.0f);
+	CHECK_EQ(frame.halos.groups[2].reach, 30.0f);
+}
+
+TEST(frame_hard_shadow_stays_in_the_main_geometry)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("o");
+	doc.base.shadow.enabled = true;
+
+	FrameState state;
+	const FrameOutput frame = build(doc, state);
+
+	CHECK_EQ(countKind(frame.geometry, QuadKind::Shadow), size_t(1));
+	CHECK(frame.halos.empty());
+}
+
+TEST(frame_gradient_with_stops_uses_a_ramp)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("ab");
+	doc.base.fill.type = FillType::Linear;
+	doc.base.fill.stops = "#00ff00 #0000ff@0.8";
+
+	const auto stops = gradientStops(doc.base.fill);
+
+	CHECK_EQ(stops.size(), size_t(4));
+	CHECK_EQ(stops[1].first, 0.4f);
+	CHECK_EQ(stops[2].first, 0.8f);
+
+	FrameState state;
+	const FrameOutput frame = build(doc, state);
+
+	CHECK(frame.image != nullptr);
+
+	// Type 3, a linear ramp: code = kind + 8 * type.
+	const float code = frame.geometry.attributes[GeometryBuffers::Em][2];
+	CHECK_EQ(int(code) / 8, 3);
+}
+
+TEST(frame_effects_are_per_character)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("abc");
+
+	StyleOverride shake;
+	shake.effect = Effect::Shake;
+	doc.applyStyle(1, 2, shake);
+
+	FrameState state;
+	const FrameOutput frame = build(doc, state);
+
+	int shaking = 0;
+
+	for (size_t v = 0; v < frame.geometry.vertexCount(); v += 4) {
+		const float code = effectOf(frame.geometry, v)[0];
+		const float kind = code - 16.0f * std::floor(code / 16.0f + 0.001f);
+
+		if (int(kind + 0.5f) == int(Effect::Shake))
+			shaking++;
+	}
+
+	CHECK_EQ(shaking, 1);
+}
+
+TEST(frame_shrinks_text_to_fit_its_box)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("A rather long name for a small box");
+	doc.base.sizePx = 60.0f;
+	doc.sizeMode = SizeMode::Fixed;
+	doc.wrap = WrapMode::None;
+	doc.boxWidth = 300.0f;
+	doc.boxHeight = 100.0f;
+
+	FrameState a;
+	const FrameOutput overflowing = build(doc, a);
+
+	doc.fit.shrink = true;
+	doc.fit.minScale = 0.05f;
+
+	FrameState b;
+	const FrameOutput fitted = build(doc, b);
+
+	CHECK(overflowing.contentX1 > 300.0f);
+	CHECK(fitted.contentX1 <= 302.0f);
+	CHECK(fitted.contentX1 > 200.0f);
+}
+
+TEST(frame_ellipsis_cuts_what_does_not_fit)
+{
+	if (!haveFonts())
+		return;
+
+	Document doc = docWith("A rather long name for a small box");
+	doc.base.sizePx = 40.0f;
+	doc.sizeMode = SizeMode::Fixed;
+	doc.wrap = WrapMode::None;
+	doc.boxWidth = 200.0f;
+	doc.boxHeight = 100.0f;
+	doc.fit.ellipsis = true;
+
+	FrameState state;
+	FrameInput input;
+	input.document = doc;
+	input.wantEditMap = true;
+
+	const FrameOutput frame = buildFrame(input, state);
+
+	CHECK(frame.contentX1 <= 202.0f);
+	CHECK(frame.contentX1 > 100.0f);
+}

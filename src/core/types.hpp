@@ -104,8 +104,11 @@ template<typename E> E enumFromString(const char *name, E fallback)
 	return fallback;
 }
 
-enum class FillType { Solid, Linear, Radial };
-SLUGGED_ENUM_TRAITS(FillType, {FillType::Solid, "solid"}, {FillType::Linear, "linear"}, {FillType::Radial, "radial"})
+// Source fills the text with another OBS source's picture (see
+// Document::fillSource), so a video or a game capture shows through the letters.
+enum class FillType { Solid, Linear, Radial, Source };
+SLUGGED_ENUM_TRAITS(FillType, {FillType::Solid, "solid"}, {FillType::Linear, "linear"}, {FillType::Radial, "radial"},
+		    {FillType::Source, "source"})
 
 // What a gradient is stretched across.
 enum class GradientSpan {
@@ -159,12 +162,19 @@ struct FontSpec {
 	bool operator==(const FontSpec &) const = default;
 };
 
-// A two-stop fill. The ramp is evaluated per pixel on the GPU.
+// A gradient fill runs from `color` to `color2`, through any stops in between.
+// The ramp is evaluated per pixel on the GPU.
 struct Fill {
 	FillType type = FillType::Solid;
 
 	Rgba color;
 	Rgba color2{0.35f, 0.6f, 1.0f, 1.0f};
+
+	// Stops between the two ends, as text so a script or the markup can write
+	// it: colours separated by spaces, each optionally followed by @ and a
+	// position from 0 to 1 ("#ff0080 #ffcc00@0.7"). Stops without a position
+	// are spread evenly. Empty for a plain two-colour gradient.
+	std::string stops;
 
 	// Linear only: direction in degrees clockwise from +x.
 	float angleDeg = 90.0f;
@@ -192,7 +202,57 @@ struct Shadow {
 	float offsetY = 2.0f;
 	Rgba color{0.0f, 0.0f, 0.0f, 0.5f};
 
+	// How soft the shadow's edge is, in source pixels: the width over which it
+	// fades out. Zero is a hard-edged shadow.
+	float blur = 0.0f;
+
 	bool operator==(const Shadow &) const = default;
+};
+
+// A soft light around the letters, drawn behind them like a shadow that sits
+// directly under the text. Solid at the letters' edge and gone `size` pixels
+// out.
+struct Glow {
+	bool enabled = false;
+	float size = 12.0f;
+	Rgba color{1.0f, 0.85f, 0.3f, 0.85f};
+
+	bool operator==(const Glow &) const = default;
+};
+
+// A movement or colour change that never settles: it plays for as long as the
+// text is on screen. Unlike the motion presets, an effect is part of the style,
+// so one word can shake while the rest of the line holds still.
+//
+// Must stay in sync with the EFFECT_* defines in data/effects/slugged.effect.
+enum class Effect {
+	None = 0,
+	Wave = 1,
+	Pulse = 2,
+	Shake = 3,
+	Glitch = 4,
+	Rainbow = 5,
+	Shimmer = 6,
+};
+SLUGGED_ENUM_TRAITS(Effect, {Effect::None, "none"}, {Effect::Wave, "wave"}, {Effect::Pulse, "pulse"},
+		    {Effect::Shake, "shake"}, {Effect::Glitch, "glitch"}, {Effect::Rainbow, "rainbow"},
+		    {Effect::Shimmer, "shimmer"})
+
+struct EffectSpec {
+	Effect kind = Effect::None;
+
+	// How strong the effect is. 1 is each effect's natural amount; distances
+	// scale with the font size, so a strength looks the same at any size.
+	float strength = 1.0f;
+
+	// Cycles per second.
+	float speed = 1.0f;
+
+	// How far apart neighbouring characters are in the cycle, in cycles: 0
+	// moves every character together, 0.5 puts neighbours in opposite phase.
+	float spread = 0.1f;
+
+	bool operator==(const EffectSpec &) const = default;
 };
 
 // Everything that can vary between two adjacent characters.
@@ -203,6 +263,8 @@ struct Style {
 	Fill fill;
 	Outline outline;
 	Shadow shadow;
+	Glow glow;
+	EffectSpec effect;
 
 	// Extra advance in source pixels, added after shaping so it never disturbs
 	// kerning or ligature formation.
@@ -242,6 +304,7 @@ struct Style {
 	X(color2, Rgba, fill.color2, "gradient_color")                   \
 	X(gradientAngle, float, fill.angleDeg, "gradient_angle")         \
 	X(gradientSpan, GradientSpan, fill.span, "gradient_span")        \
+	X(gradientStops, std::string, fill.stops, "gradient_stops")      \
 	X(outline, bool, outline.enabled, "outline")                     \
 	X(outlineWidth, float, outline.widthPx, "outline_width")         \
 	X(outlineColor, Rgba, outline.color, "outline_color")            \
@@ -250,6 +313,14 @@ struct Style {
 	X(shadowX, float, shadow.offsetX, "shadow_x")                    \
 	X(shadowY, float, shadow.offsetY, "shadow_y")                    \
 	X(shadowColor, Rgba, shadow.color, "shadow_color")               \
+	X(shadowBlur, float, shadow.blur, "shadow_blur")                 \
+	X(glow, bool, glow.enabled, "glow")                              \
+	X(glowSize, float, glow.size, "glow_size")                       \
+	X(glowColor, Rgba, glow.color, "glow_color")                     \
+	X(effect, Effect, effect.kind, "effect")                         \
+	X(effectStrength, float, effect.strength, "effect_strength")     \
+	X(effectSpeed, float, effect.speed, "effect_speed")              \
+	X(effectSpread, float, effect.spread, "effect_spread")           \
 	X(letterSpacing, float, letterSpacing, "letter_spacing")         \
 	X(wordSpacing, float, wordSpacing, "word_spacing")               \
 	X(language, std::string, language, "language")                   \
@@ -537,6 +608,12 @@ struct MotionSpec {
 	// Seconds between replays for MotionTrigger::Loop.
 	float loopInterval = 5.0f;
 
+	// When a number in the text changes (a follower count, a score), count
+	// through the values in between over `countDuration` seconds instead of
+	// jumping straight to the new one.
+	bool countUp = false;
+	float countDuration = 1.0f;
+
 	// How long one pass takes once the stagger is spread over `units`.
 	float passDuration(uint32_t units) const
 	{
@@ -546,6 +623,29 @@ struct MotionSpec {
 	}
 
 	bool operator==(const MotionSpec &) const = default;
+};
+
+// Shows one line of the text at a time, moving on to the next every `interval`
+// seconds: sponsors, socials, rules. Each line keeps its own styling, and the
+// change between lines plays the text-change motion.
+struct RotateSpec {
+	bool enabled = false;
+	float interval = 8.0f;
+	bool shuffle = false;
+
+	bool operator==(const RotateSpec &) const = default;
+};
+
+// What a fixed box does with text too big for it.
+struct FitSpec {
+	// Scale the text down until it fits, but not below `minScale` of its size.
+	bool shrink = false;
+	float minScale = 0.3f;
+
+	// Whatever still does not fit is cut off and ends in "...".
+	bool ellipsis = false;
+
+	bool operator==(const FitSpec &) const = default;
 };
 
 // Continuous movement of the whole text through its box.

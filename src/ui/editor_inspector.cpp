@@ -24,11 +24,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "editor_common.hpp"
 #include "styles_panel.hpp"
 #include "widgets.hpp"
+#include "../core/markup.hpp"
 #include "../obs/settings.hpp"
 #include "../text/font_enum.hpp"
 #include "../text/font_manager.hpp"
 
 #include <cmath>
+#include <iterator>
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -360,15 +362,34 @@ void EditorWindow::buildTextSection()
 	_fillMode->setAccessibleName(tr_("Fill"));
 	_fillMode->addOption(tr_("Editor.Fill.Solid"), 0);
 	_fillMode->addOption(tr_("Editor.Fill.Gradient"), 1);
+	_fillMode->addOption(tr_("Editor.Fill.Source"), 2);
 
 	connect(_fillMode, &ui::Segmented::chosen, this, [this](int value) {
 		StyleOverride d;
 
 		// Turning the gradient back on returns to the kind it was.
-		d.fillType = value == 0 ? FillType::Solid : comboValue<FillType>(_gradientType);
+		d.fillType = value == 0 ? FillType::Solid
+					: (value == 2 ? FillType::Source : comboValue<FillType>(_gradientType));
 		applyStyle(d);
 		syncControls();
 	});
+
+	// ---- another source's picture ----
+	QVBoxLayout *sourceFill = nullptr;
+	_fillSourceBox = subBox(panel, sourceFill);
+
+	_fillSourceList = new QComboBox(_fillSourceBox);
+	_fillSourceList->setAccessibleName(tr_("Fill.SourceName"));
+
+	// The source is the whole text's: one picture per Slugged source, which
+	// any part of the text can be filled with.
+	connect(_fillSourceList, &QComboBox::activated, this, [this]() {
+		const std::string name = _fillSourceList->currentData().toString().toStdString();
+
+		applyDocument([name](Document &d) { d.fillSource = name; });
+	});
+
+	sourceFill->addWidget(row(tr_("Fill.SourceName"), _fillSourceList, _fillSourceBox));
 
 	// ---- gradient ----
 	QVBoxLayout *gradient = nullptr;
@@ -406,9 +427,69 @@ void EditorWindow::buildTextSection()
 
 	_gradientAngleRow = row(tr_("Fill.Angle"), _gradientAngle, _gradientBox);
 
+	_gradientStops = new QLineEdit(_gradientBox);
+	_gradientStops->setPlaceholderText("#ff0080 #ffcc00@0.7");
+	_gradientStops->setToolTip(tr_("Fill.Stops.Hint"));
+	_gradientStops->setAccessibleName(tr_("Fill.Stops"));
+
+	connect(_gradientStops, &QLineEdit::editingFinished, this, [this]() {
+		StyleOverride d;
+		d.gradientStops = _gradientStops->text().trimmed().toStdString();
+		applyStyle(d);
+	});
+
+	// A few ready-made gradients, applied in one step.
+	struct Preset {
+		const char *key;
+		const char *from;
+		const char *to;
+		const char *stops;
+		float angle;
+	};
+
+	static const Preset kPresets[] = {
+		{"Fill.Preset.Sunset", "#ff512f", "#f9d423", "#ff8a00", 90.0f},
+		{"Fill.Preset.Ocean", "#00c6ff", "#0047a3", "#0083d6", 90.0f},
+		{"Fill.Preset.Neon", "#ff00cc", "#00e5ff", "#7a00ff", 0.0f},
+		{"Fill.Preset.Gold", "#bf953f", "#aa771c", "#fcf6ba #b38728 #fbf5b7", 90.0f},
+		{"Fill.Preset.Fire", "#ffe259", "#e52d27", "#ff8c00", 90.0f},
+		{"Fill.Preset.Ice", "#ffffff", "#5fc3e4", "#d6f5ff", 90.0f},
+		{"Fill.Preset.Rainbow", "#ff0000", "#8000ff", "#ff8000 #ffff00 #00d000 #00c0ff #0040ff", 0.0f},
+		{"Fill.Preset.Mint", "#00b09b", "#96c93d", "", 0.0f},
+	};
+
+	_gradientPresets = new QComboBox(_gradientBox);
+	_gradientPresets->setAccessibleName(tr_("Fill.Presets"));
+	_gradientPresets->addItem(tr_("Fill.Presets"), -1);
+
+	for (int i = 0; i < int(std::size(kPresets)); i++)
+		_gradientPresets->addItem(tr_(kPresets[i].key), i);
+
+	connect(_gradientPresets, &QComboBox::activated, this, [this]() {
+		const int index = _gradientPresets->currentData().toInt();
+
+		_gradientPresets->setCurrentIndex(0);
+
+		if (index < 0)
+			return;
+
+		const Preset &preset = kPresets[index];
+
+		StyleOverride d;
+		d.fillType = FillType::Linear;
+		d.color = parseColor(preset.from).value_or(Rgba{});
+		d.color2 = parseColor(preset.to).value_or(Rgba{});
+		d.gradientStops = preset.stops;
+		d.gradientAngle = preset.angle;
+		applyStyle(d);
+		syncControls();
+	});
+
 	gradient->addWidget(line(_gradientBox, {_fillColor2, _gradientType}));
 	gradient->addWidget(_gradientAngleRow);
 	gradient->addWidget(row(tr_("Fill.Span"), _gradientSpan, _gradientBox));
+	gradient->addWidget(row(tr_("Fill.Stops"), _gradientStops, _gradientBox));
+	gradient->addWidget(_gradientPresets);
 
 	_differsLegend = caption(tr_("Editor.Differs"), panel);
 
@@ -417,6 +498,7 @@ void EditorWindow::buildTextSection()
 	body->addWidget(marks);
 	body->addWidget(_fillMode);
 	body->addWidget(_gradientBox);
+	body->addWidget(_fillSourceBox);
 	body->addWidget(_differsLegend);
 }
 
@@ -511,10 +593,68 @@ void EditorWindow::buildEffectsSection()
 	_shadowY = styleFloat(_shadowBox, -500.0, 500.0, 1.0, tr_("Editor.Shadow.Down"),
 			      [](StyleOverride &d, float v) { d.shadowY = v; });
 
-	shadow->addWidget(_shadowColor);
+	_shadowBlur = styleFloat(_shadowBox, 0.0, 200.0, 1.0, tr_("Shadow.Blur"),
+				 [](StyleOverride &d, float v) { d.shadowBlur = v; });
+
+	shadow->addWidget(line(_shadowBox, {_shadowColor, _shadowBlur}));
 	shadow->addWidget(line(_shadowBox, {_shadowX, _shadowY}));
 
 	body->addWidget(_shadowBox);
+
+	// ---- glow ----
+	body->addWidget(switchRow(panel, tr_("Glow"), _glowEnabled));
+	styleSwitch(_glowEnabled, [](StyleOverride &d, bool on) { d.glow = on; });
+
+	QVBoxLayout *glow = nullptr;
+	_glowBox = subBox(panel, glow);
+
+	_glowColor = styleColor(_glowBox, "Color", [](StyleOverride &d, Rgba c) { d.glowColor = c; });
+	_glowSize = styleFloat(_glowBox, 1.0, 200.0, 1.0, tr_("Editor.Size"),
+			       [](StyleOverride &d, float v) { d.glowSize = v; });
+
+	glow->addWidget(line(_glowBox, {_glowColor, _glowSize}));
+
+	body->addWidget(_glowBox);
+
+	// ---- a never-ending effect: style, so a selection can have its own ----
+	_effectKind = enumCombo<Effect>(panel, {{Effect::None, "Effect.None"},
+						{Effect::Wave, "Effect.Wave"},
+						{Effect::Pulse, "Effect.Pulse"},
+						{Effect::Shake, "Effect.Shake"},
+						{Effect::Glitch, "Effect.Glitch"},
+						{Effect::Rainbow, "Effect.Rainbow"},
+						{Effect::Shimmer, "Effect.Shimmer"}});
+	_effectKind->setAccessibleName(tr_("Effect"));
+
+	connect(_effectKind, &QComboBox::activated, this, [this]() {
+		StyleOverride d;
+		d.effect = comboValue<Effect>(_effectKind);
+		applyStyle(d);
+		syncControls();
+	});
+
+	QVBoxLayout *effect = nullptr;
+	_effectBox = subBox(panel, effect);
+
+	_effectStrength = styleFloat(_effectBox, 0.0, 5.0, 0.1, tr_("Effect.Strength"),
+				     [](StyleOverride &d, float v) { d.effectStrength = v; });
+	_effectSpeed = styleFloat(_effectBox, 0.05, 5.0, 0.05, tr_("Effect.Speed"),
+				  [](StyleOverride &d, float v) { d.effectSpeed = v; });
+	_effectSpread = styleFloat(_effectBox, 0.0, 1.0, 0.02, tr_("Effect.Spread"),
+				   [](StyleOverride &d, float v) { d.effectSpread = v; });
+
+	_effectStrength->setDecimals(2);
+	_effectSpeed->setDecimals(2);
+	_effectSpeed->setSuffix(" Hz");
+	_effectSpread->setDecimals(2);
+	_effectSpread->setToolTip(tr_("Effect.Spread.Hint"));
+
+	effect->addWidget(line(_effectBox, {_effectStrength, _effectSpeed}));
+	effect->addWidget(_effectSpread);
+
+	body->addWidget(row(tr_("Effect"), _effectKind, panel));
+	body->addWidget(caption(tr_("Effect.About"), panel));
+	body->addWidget(_effectBox);
 
 	// ---- background: the whole source's, whatever is selected ----
 	body->addWidget(switchRow(panel, tr_("Editor.BackgroundBox"), _background));
@@ -620,9 +760,40 @@ void EditorWindow::buildLayoutSection()
 	connect(_valign, &ui::Segmented::chosen, this,
 		[this](int value) { applyDocument([value](Document &d) { d.valign = VAlign(value); }); });
 
+	// ---- text too big for the box ----
+	_fitShrink = new QCheckBox(tr_("Fit.Shrink"), _boxControls);
+	_fitShrink->setToolTip(tr_("Fit.Hint"));
+
+	connect(_fitShrink, &QCheckBox::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.fit.shrink = on; }); });
+
+	_fitMin = new QSpinBox(_boxControls);
+	_fitMin->setRange(5, 100);
+	_fitMin->setSuffix(" %");
+	_fitMin->setKeyboardTracking(false);
+	_fitMin->setAccessibleName(tr_("Fit.Min"));
+
+	connect(_fitMin, &QSpinBox::valueChanged, this,
+		[this](int v) { applyDocument([v](Document &d) { d.fit.minScale = float(v) / 100.0f; }); });
+
+	_fitMinRow = row(tr_("Fit.Min"), _fitMin, _boxControls);
+
+	_fitEllipsis = new QCheckBox(tr_("Fit.Ellipsis"), _boxControls);
+	_fitEllipsis->setToolTip(tr_("Fit.Hint"));
+
+	connect(_fitEllipsis, &QCheckBox::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.fit.ellipsis = on; }); });
+
+	auto *fitLabel = new QLabel(tr_("Fit"), _boxControls);
+	fitLabel->setObjectName("muted");
+
 	box->addWidget(line(_boxControls, {_boxWidth, _boxHeight}));
 	box->addWidget(row(tr_("Wrap"), _wrap, _boxControls));
 	box->addWidget(_valign);
+	box->addWidget(fitLabel);
+	box->addWidget(_fitShrink);
+	box->addWidget(_fitMinRow);
+	box->addWidget(_fitEllipsis);
 
 	_lineHeight = spin(panel, 0.3, 5.0, 0.05, nullptr, 2);
 
@@ -874,6 +1045,48 @@ void EditorWindow::buildMotionSection()
 	details->addWidget(_fineTune);
 
 	body->addWidget(_motionDetails);
+
+	// ---- numbers counting up ----
+	_countUp = new QCheckBox(tr_("CountUp"), panel);
+	_countUp->setToolTip(tr_("CountUp.Hint"));
+
+	connect(_countUp, &QCheckBox::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.motion.countUp = on; }); });
+
+	_countDuration = spin(panel, 0.05, 60.0, 0.1, " s", 2);
+
+	connect(_countDuration, &QDoubleSpinBox::valueChanged, this,
+		[this](double v) { applyDocument([v](Document &d) { d.motion.countDuration = float(v); }); });
+
+	_countDurationRow = row(tr_("CountUp.Duration"), _countDuration, panel);
+
+	body->addWidget(_countUp);
+	body->addWidget(_countDurationRow);
+
+	// ---- lines taking turns ----
+	body->addWidget(switchRow(panel, tr_("Rotate"), _rotateEnabled, tr_("Rotate.About")));
+
+	connect(_rotateEnabled, &ui::Switch::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.rotate.enabled = on; }); });
+
+	QVBoxLayout *rotate = nullptr;
+	_rotateBox = subBox(panel, rotate);
+
+	_rotateInterval = spin(_rotateBox, 0.5, 86400.0, 0.5, " s", 1);
+
+	connect(_rotateInterval, &QDoubleSpinBox::valueChanged, this,
+		[this](double v) { applyDocument([v](Document &d) { d.rotate.interval = float(v); }); });
+
+	_rotateShuffle = new QCheckBox(tr_("Rotate.Shuffle"), _rotateBox);
+
+	connect(_rotateShuffle, &QCheckBox::clicked, this,
+		[this](bool on) { applyDocument([on](Document &d) { d.rotate.shuffle = on; }); });
+
+	rotate->addWidget(row(tr_("Rotate.Interval"), _rotateInterval, _rotateBox));
+	rotate->addWidget(_rotateShuffle);
+	rotate->addWidget(caption(tr_("Rotate.Hint"), _rotateBox));
+
+	body->addWidget(_rotateBox);
 
 	// ---- scrolling ----
 	body->addWidget(switchRow(panel, tr_("Editor.Scroll"), _scrollEnabled, tr_("Editor.Scroll.About")));
@@ -1174,6 +1387,82 @@ void EditorWindow::buildMoreSection()
 	whole->addWidget(
 		pathField(_wholeTextBox, "variables_file", "Variables.File.Filter", "Variables.File", _variablesFile));
 
+	// ---- the counter the hotkeys step ----
+	whole->addWidget(heading(tr_("Counter"), _wholeTextBox));
+
+	_counterVariable = new QLineEdit(_wholeTextBox);
+	_counterVariable->setPlaceholderText("count");
+	_counterVariable->setAccessibleName(tr_("Counter.Variable"));
+
+	connect(_counterVariable, &QLineEdit::editingFinished, this, [this]() {
+		if (_updating)
+			return;
+
+		const std::string name = _counterVariable->text().trimmed().toStdString();
+
+		writeSettings(
+			[name](obs_data_t *data) {
+				obs_data_set_string(data, settings::kCounterVariableKey, name.c_str());
+			},
+			false);
+	});
+
+	_counterStep = spin(_wholeTextBox, -1e6, 1e6, 1.0, nullptr, 2);
+	_counterStep->setAccessibleName(tr_("Counter.Step"));
+
+	connect(_counterStep, &QDoubleSpinBox::valueChanged, this, [this](double v) {
+		if (_updating)
+			return;
+
+		writeSettings([v](obs_data_t *data) { obs_data_set_double(data, settings::kCounterStepKey, v); },
+			      false);
+	});
+
+	auto counterButton = [this](const char *key, const char *proc) {
+		auto *button = new QPushButton(tr_(key), _wholeTextBox);
+		button->setObjectName("ghost");
+
+		connect(button, &QPushButton::clicked, this, [this, proc]() { callProc(proc); });
+
+		return button;
+	};
+
+	whole->addWidget(row(tr_("Counter.Variable"), _counterVariable, _wholeTextBox));
+	whole->addWidget(row(tr_("Counter.Step"), _counterStep, _wholeTextBox));
+	whole->addWidget(line(_wholeTextBox, {counterButton("Counter.Down", "decrement_variable"),
+					      counterButton("Counter.Up", "increment_variable"),
+					      counterButton("Counter.Reset", "reset_variable")}));
+	whole->addWidget(caption(tr_("Counter.Hint"), _wholeTextBox));
+
+	// ---- an overlay filter: how the text meets the picture under it ----
+	_filterModeBox = new QWidget(_wholeTextBox);
+
+	auto *filterLayout = new QVBoxLayout(_filterModeBox);
+	filterLayout->setContentsMargins(0, 0, 0, 0);
+	filterLayout->setSpacing(8);
+
+	_filterMode = enumCombo<FilterMode>(_filterModeBox, {{FilterMode::Overlay, "FilterMode.Overlay"},
+							     {FilterMode::Mask, "FilterMode.Mask"},
+							     {FilterMode::Knockout, "FilterMode.Knockout"}});
+	_filterMode->setAccessibleName(tr_("FilterMode"));
+
+	connect(_filterMode, &QComboBox::activated, this, [this]() {
+		const FilterMode mode = comboValue<FilterMode>(_filterMode);
+
+		writeSettings(
+			[mode](obs_data_t *data) {
+				obs_data_set_string(data, settings::kFilterModeKey, enumToString(mode));
+			},
+			false);
+	});
+
+	filterLayout->addWidget(heading(tr_("FilterMode"), _filterModeBox));
+	filterLayout->addWidget(_filterMode);
+
+	_filterModeBox->setVisible(_source && obs_source_get_type(_source) == OBS_SOURCE_TYPE_FILTER);
+
+	whole->addWidget(_filterModeBox);
+
 	auto *restart = new QPushButton(tr_("Editor.StartOver"), _wholeTextBox);
 	restart->setObjectName("link");
 	restart->setCursor(Qt::PointingHandCursor);
@@ -1197,6 +1486,43 @@ void EditorWindow::populateFamilies()
 
 	_fontFamily->setCurrentText(current);
 	_fontFamily->blockSignals(blocked);
+}
+
+void EditorWindow::populateFillSources()
+{
+	const QString current = QString::fromStdString(_document.fillSource);
+	const bool blocked = _fillSourceList->blockSignals(true);
+
+	_fillSourceList->clear();
+	_fillSourceList->addItem(tr_("Fill.SourceName.None"), QString());
+
+	struct Context {
+		QComboBox *list;
+		obs_source_t *self;
+	} context{_fillSourceList, _source};
+
+	auto add = [](void *data, obs_source_t *source) {
+		auto *ctx = static_cast<Context *>(data);
+
+		if (source != ctx->self && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO)) {
+			const QString name = QString::fromUtf8(obs_source_get_name(source));
+
+			if (!name.isEmpty())
+				ctx->list->addItem(name, name);
+		}
+
+		return true;
+	};
+
+	obs_enum_scenes(add, &context);
+	obs_enum_sources(add, &context);
+
+	// A source that has gone keeps its name, so the choice is not lost.
+	if (!current.isEmpty() && _fillSourceList->findData(current) < 0)
+		_fillSourceList->addItem(current, current);
+
+	_fillSourceList->setCurrentIndex(std::max(0, _fillSourceList->findData(current)));
+	_fillSourceList->blockSignals(blocked);
 }
 
 void EditorWindow::rebuildAxisControls()
@@ -1313,12 +1639,17 @@ void EditorWindow::syncControls()
 
 	_fillColor->setColor(style.fill.color);
 	_fillColor2->setColor(style.fill.color2);
-	_fillMode->setValue(style.fill.type == FillType::Solid ? 0 : 1);
+	_fillMode->setValue(style.fill.type == FillType::Solid ? 0 : (style.fill.type == FillType::Source ? 2 : 1));
 	_gradientAngle->setValue(double(style.fill.angleDeg));
 	setCombo(_gradientSpan, int(style.fill.span));
+	_gradientStops->setText(QString::fromStdString(style.fill.stops));
 
-	if (style.fill.type != FillType::Solid)
+	if (style.fill.type == FillType::Linear || style.fill.type == FillType::Radial)
 		setCombo(_gradientType, int(style.fill.type));
+
+	// Listing every source is only worth it while the list can be seen.
+	if (style.fill.type == FillType::Source)
+		populateFillSources();
 
 	_quickSize->setText(QString::number(int(std::lround(style.sizePx))));
 	_quickBold->setChecked(style.font.weight >= 600);
@@ -1345,6 +1676,16 @@ void EditorWindow::syncControls()
 	_shadowX->setValue(double(style.shadow.offsetX));
 	_shadowY->setValue(double(style.shadow.offsetY));
 	_shadowColor->setColor(style.shadow.color);
+	_shadowBlur->setValue(double(style.shadow.blur));
+
+	_glowEnabled->setChecked(style.glow.enabled);
+	_glowColor->setColor(style.glow.color);
+	_glowSize->setValue(double(style.glow.size));
+
+	setCombo(_effectKind, int(style.effect.kind));
+	_effectStrength->setValue(double(style.effect.strength));
+	_effectSpeed->setValue(double(style.effect.speed));
+	_effectSpread->setValue(double(style.effect.spread));
 
 	_background->setChecked(_document.background.enabled);
 	_backgroundColor->setColor(_document.background.color);
@@ -1358,6 +1699,9 @@ void EditorWindow::syncControls()
 	_boxHeight->setValue(int(std::lround(_document.boxHeight)));
 	setCombo(_wrap, int(_document.wrap));
 	_valign->setValue(int(_document.valign));
+	_fitShrink->setChecked(_document.fit.shrink);
+	_fitMin->setValue(int(std::lround(_document.fit.minScale * 100.0f)));
+	_fitEllipsis->setChecked(_document.fit.ellipsis);
 	_lineHeight->setValue(double(paragraph.lineHeight));
 
 	// ---- motion ----
@@ -1388,6 +1732,13 @@ void EditorWindow::syncControls()
 		_motionParam->setSingleStep(double(amount.step));
 		_motionParam->setValue(double(m.param));
 	}
+
+	_countUp->setChecked(m.countUp);
+	_countDuration->setValue(double(m.countDuration));
+
+	_rotateEnabled->setChecked(_document.rotate.enabled);
+	_rotateInterval->setValue(double(_document.rotate.interval));
+	_rotateShuffle->setChecked(_document.rotate.shuffle);
 
 	_scrollEnabled->setChecked(_document.scroll.enabled);
 	_scrollX->setValue(double(_document.scroll.speedX));
@@ -1464,16 +1815,20 @@ void EditorWindow::syncVisibility()
 	const bool selection = selectionRange(start, end);
 	const Style style = selection ? _document.styleAt(start + 1) : _document.base;
 
-	_gradientBox->setVisible(style.fill.type != FillType::Solid);
+	_gradientBox->setVisible(style.fill.type == FillType::Linear || style.fill.type == FillType::Radial);
 	_gradientAngleRow->setVisible(style.fill.type == FillType::Linear);
+	_fillSourceBox->setVisible(style.fill.type == FillType::Source);
 
 	_outlineBox->setVisible(style.outline.enabled);
 	_shadowBox->setVisible(style.shadow.enabled);
+	_glowBox->setVisible(style.glow.enabled);
+	_effectBox->setVisible(style.effect.kind != Effect::None);
 	_backgroundBox->setVisible(_document.background.enabled);
 
 	const bool fixed = _document.sizeMode == SizeMode::Fixed;
 
 	_boxControls->setVisible(fixed);
+	_fitMinRow->setVisible(_document.fit.shrink);
 
 	// Alignment has nothing to align within on one auto-sized line; say so
 	// rather than leave a control that visibly does nothing.
@@ -1502,6 +1857,9 @@ void EditorWindow::syncVisibility()
 	_motionStaggerRow->setVisible(staggered);
 	_motionParamRow->setVisible(motionParamSpec(m.motion).label != nullptr);
 	_motionSpeedRow->setVisible(m.motion == Motion::Wave);
+
+	_countDurationRow->setVisible(m.countUp);
+	_rotateBox->setVisible(_document.rotate.enabled);
 
 	_scrollBox->setVisible(_document.scroll.enabled);
 	_scrollGapRow->setVisible(_document.scroll.loop);
@@ -1539,6 +1897,12 @@ void EditorWindow::syncSummaries()
 
 	if (style.shadow.enabled)
 		effects << tr_("Shadow");
+
+	if (style.glow.enabled)
+		effects << tr_("Glow");
+
+	if (style.effect.kind != Effect::None)
+		effects << _effectKind->currentText();
 
 	if (_document.background.enabled)
 		effects << tr_("Editor.BackgroundBox");
@@ -1602,6 +1966,9 @@ void EditorWindow::syncSummaries()
 
 		motion << name;
 	}
+
+	if (_document.rotate.enabled)
+		motion << tr_("Rotate");
 
 	if (_document.scroll.enabled)
 		motion << tr_("Editor.Summary.Scroll");

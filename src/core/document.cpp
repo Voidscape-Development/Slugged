@@ -489,4 +489,47 @@ void Document::normalize()
 		normalizeBlock(block);
 }
 
+namespace {
+
+void scaleStyle(Style &style, float k)
+{
+	style.sizePx *= k;
+	style.letterSpacing *= k;
+	style.wordSpacing *= k;
+	style.outline.widthPx *= k;
+	style.shadow.offsetX *= k;
+	style.shadow.offsetY *= k;
+	style.shadow.blur *= k;
+	style.glow.size *= k;
+}
+
+void scaleOverride(StyleOverride &o, float k)
+{
+	for (std::optional<float> *field : {&o.size, &o.letterSpacing, &o.wordSpacing, &o.outlineWidth, &o.shadowX,
+					    &o.shadowY, &o.shadowBlur, &o.glowSize})
+		if (*field)
+			**field *= k;
+}
+
+} // namespace
+
+void Document::scaleSizes(float factor)
+{
+	scaleStyle(base, factor);
+
+	paragraph.spaceBefore *= factor;
+	paragraph.spaceAfter *= factor;
+
+	for (Block &block : blocks) {
+		if (block.paragraph.spaceBefore)
+			*block.paragraph.spaceBefore *= factor;
+
+		if (block.paragraph.spaceAfter)
+			*block.paragraph.spaceAfter *= factor;
+
+		for (Run &run : block.runs)
+			scaleOverride(run.style, factor);
+	}
+}
+
 } // namespace slugged

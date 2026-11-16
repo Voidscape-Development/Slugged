@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace slugged {
@@ -34,22 +35,25 @@ namespace slugged {
 // because libobs's struct vec3 is 16 bytes wide.
 //
 // The attribute layout is documented in data/effects/slugged.effect; the order
-// below is the TEXCOORD index of each attribute.
+// below is the TEXCOORD index of each attribute. There must be no more than
+// ten: libobs's OpenGL backend reads a single digit after TEXCOORD, so
+// TEXCOORD10 would silently read TEXCOORD1's data.
 struct GeometryBuffers {
 	enum Attribute {
-		Em,        // em.xy, code (kind + 8 * gradient type), shape A's knock-out alpha
-		ABand,     // shape A: band transform
-		AShape,    // shape A: band location and limits
-		BBand,     // shape B (the outline ring): band transform
-		BShape,    // shape B: band location and limits
-		Color,     // colour, or gradient start
-		Color2,    // gradient end
-		Motion,    // preset, amount, start (all), duration
-		Pivot,     // pivot.xy, stagger index, start (changed characters only)
-		Direction, // direction.xy, radians per second, shape B's knock-out alpha
-		Gradient,  // gradient u, v; shadow-to-glyph offset in em
+		Em,       // em.xy, code (kind + 8 * gradient type + 64 * B's knock-out), shape A's knock-out alpha
+		ABand,    // shape A: band transform
+		AShape,   // shape A: band location and limits
+		BBand,    // shape B (the outline ring): band transform
+		BShape,   // shape B: band location and limits
+		Color,    // colour, or gradient start
+		Color2,   // gradient end
+		Pivot,    // pivot.xy, stagger index, start (changed characters only)
+		Gradient, // gradient u, v; shadow-to-glyph offset in em
+		Effect,   // effect kind + 16 * seed, amount, radians per second, phase
 		AttributeCount,
 	};
+
+	static_assert(AttributeCount <= 10, "libobs-opengl cannot address TEXCOORD10 and above");
 
 	std::vector<float> positions;
 	std::array<std::vector<float>, AttributeCount> attributes;
@@ -80,7 +84,19 @@ enum class QuadKind {
 struct FrameRequests {
 	std::vector<ShapeRequest> shapes;
 	std::vector<ImageAtlas::Request> images;
+
+	// Gradient ramps the image requests point into: a gradient with stops
+	// between its ends is drawn from a strip of colour in the image atlas.
+	std::vector<std::unique_ptr<BitmapGlyph>> ramps;
 };
+
+// A gradient's stops, ends included, sorted by position. Two stops for a plain
+// two-colour gradient.
+std::vector<std::pair<float, Rgba>> gradientStops(const Fill &fill);
+
+// Whether a fill is drawn from a ramp in the image atlas rather than by
+// blending its two end colours.
+bool usesRamp(const Fill &fill);
 
 FrameRequests collectRequests(const LayoutResult &layout);
 
@@ -112,6 +128,39 @@ struct GeometryStats {
 	uint32_t changedUnits = 0;
 };
 
+// One soft layer behind the text -- a glow, or a soft drop shadow -- drawn by
+// rendering its silhouettes sharply offscreen, blurring that image and laying
+// the result behind the text. Silhouettes that blur alike share a group.
+struct HaloGroup {
+	// How far past the letters' edge the blur reaches, in pixels, and the gain
+	// applied to the blurred coverage (2 for a glow, solid at the edge).
+	float reach = 0.0f;
+	float gain = 1.0f;
+
+	// The highest colour alpha in the group, which the gain may not push past.
+	float alphaCap = 1.0f;
+
+	// The group's quads in HaloLayers::geometry.
+	uint32_t firstIndex = 0;
+	uint32_t indexCount = 0;
+};
+
+struct HaloLayers {
+	GeometryBuffers geometry;
+	std::vector<HaloGroup> groups;
+
+	bool empty() const { return groups.empty(); }
+
+	void clear()
+	{
+		geometry.clear();
+		groups.clear();
+	}
+};
+
+// Silhouettes blurring less than this stay sharp quads in the main geometry.
+constexpr float kMinHaloReach = 1.5f;
+
 // Turns positioned glyphs into drawable quads, layered so plain alpha blending
 // is right without depth or sorting: every shadow, then every outline, then
 // every fill, then underline and strikeout bars on top. Outlines and shadows
@@ -120,7 +169,8 @@ struct GeometryStats {
 class GeometryBuilder {
 public:
 	static GeometryStats build(const Document &doc, const LayoutResult &layout, const AtlasCache &atlas,
-				   const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out);
+				   const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out,
+				   HaloLayers *halos = nullptr);
 
 	// A rounded rectangle covering (0, 0)-(width, height).
 	static void buildBackground(const Background &background, float width, float height, GeometryBuffers &out);

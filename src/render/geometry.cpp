@@ -17,12 +17,15 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "geometry.hpp"
+#include "../core/markup.hpp"
 #include "../text/font_manager.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <set>
+#include <sstream>
 #include <string>
 
 namespace slugged {
@@ -104,15 +107,19 @@ struct QuadAttrs {
 	Rgba color;
 	Rgba color2;
 
-	float motionMode = 0.0f;
-	float motionParam = 0.0f;
-	float startAll = 0.0f;
-	float duration = 1.0f;
+	// The motion preset, its timing and its direction are the same for every
+	// quad and reach the shader as uniforms; only where a quad falls in the
+	// stagger is its own.
 	float staggerIndex = 0.0f;
 	float startChanged = -1.0f;
-	float dirX = 0.0f;
-	float dirY = -1.0f;
-	float omega = 0.0f;
+
+	// The never-ending effect: kind + 16 * seed, amount, radians per second,
+	// phase. The seed (the glyph's ordinal) is shared by every quad of one
+	// glyph, so its shadow and outline shake with it.
+	float effectCode = 0.0f;
+	float effectAmount = 0.0f;
+	float effectOmega = 0.0f;
+	float effectPhase = 0.0f;
 };
 
 using GradientFn = std::function<std::pair<float, float>(const Corner &)>;
@@ -147,20 +154,24 @@ void emit(GeometryBuffers &out, const std::array<Corner, 4> &corners, const Quad
 	for (const Corner &c : corners) {
 		push4(out.positions, c.x, c.y, 0.0f, 1.0f);
 
-		push4(attr[GeometryBuffers::Em], c.ex, c.ey, float(int(a.kind) + 8 * a.gradientType), a.knockA);
+		// Shape B's knock-out alpha rides in the code's high bits, quantised
+		// to 8 bits: kind and gradient type stay below 64.
+		const float code = float(int(a.kind) + 8 * a.gradientType) +
+				   64.0f * std::round(std::clamp(a.knockB, 0.0f, 1.0f) * 255.0f);
+
+		push4(attr[GeometryBuffers::Em], c.ex, c.ey, code, a.knockA);
 		push4(attr[GeometryBuffers::ABand], a.aBand);
 		push4(attr[GeometryBuffers::AShape], a.aShape);
 		push4(attr[GeometryBuffers::BBand], a.bBand);
 		push4(attr[GeometryBuffers::BShape], a.bShape);
 		push4(attr[GeometryBuffers::Color], a.color.r, a.color.g, a.color.b, a.color.a);
 		push4(attr[GeometryBuffers::Color2], a.color2.r, a.color2.g, a.color2.b, a.color2.a);
-		push4(attr[GeometryBuffers::Motion], a.motionMode, a.motionParam, a.startAll, a.duration);
 		push4(attr[GeometryBuffers::Pivot], pivotX, pivotY, a.staggerIndex, a.startChanged);
-		push4(attr[GeometryBuffers::Direction], a.dirX, a.dirY, a.omega, a.knockB);
 
 		const auto uv = gradient ? gradient(c) : std::pair<float, float>{0.0f, 0.0f};
 
 		push4(attr[GeometryBuffers::Gradient], uv.first, uv.second, a.knockOffsetX, a.knockOffsetY);
+		push4(attr[GeometryBuffers::Effect], a.effectCode, a.effectAmount, a.effectOmega, a.effectPhase);
 	}
 
 	for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u})
@@ -259,6 +270,156 @@ GradientFn screenGradient(const Fill &fill, float bx0, float by0, float bx1, flo
 	};
 }
 
+constexpr int kRampWidth = 256;
+
+std::string hexOf(const Rgba &c)
+{
+	char buf[16];
+	std::snprintf(buf, sizeof(buf), "%08x", unsigned(c.toObsColor()));
+	return buf;
+}
+
+std::string rampKey(const Fill &fill)
+{
+	return "g" + hexOf(fill.color) + hexOf(fill.color2) + ":" + fill.stops;
+}
+
+std::unique_ptr<BitmapGlyph> makeRamp(const Fill &fill)
+{
+	const auto stops = gradientStops(fill);
+
+	auto ramp = std::make_unique<BitmapGlyph>();
+	ramp->width = kRampWidth;
+	ramp->height = 1;
+	ramp->rgba.resize(size_t(kRampWidth) * 4);
+
+	for (int i = 0; i < kRampWidth; i++) {
+		const float t = float(i) / float(kRampWidth - 1);
+
+		// The stops either side of t.
+		size_t hi = 0;
+
+		while (hi < stops.size() && stops[hi].first < t)
+			hi++;
+
+		Rgba c;
+
+		if (hi == 0) {
+			c = stops.front().second;
+		} else if (hi >= stops.size()) {
+			c = stops.back().second;
+		} else {
+			const auto &[p0, c0] = stops[hi - 1];
+			const auto &[p1, c1] = stops[hi];
+			const float f = p1 > p0 ? (t - p0) / (p1 - p0) : 1.0f;
+
+			c = Rgba{c0.r + (c1.r - c0.r) * f, c0.g + (c1.g - c0.g) * f, c0.b + (c1.b - c0.b) * f,
+				 c0.a + (c1.a - c0.a) * f};
+		}
+
+		const uint32_t packed = c.toObsColor();
+
+		// 0xAABBGGRR is R, G, B, A in memory order.
+		ramp->rgba[size_t(i) * 4 + 0] = uint8_t(packed & 0xFF);
+		ramp->rgba[size_t(i) * 4 + 1] = uint8_t((packed >> 8) & 0xFF);
+		ramp->rgba[size_t(i) * 4 + 2] = uint8_t((packed >> 16) & 0xFF);
+		ramp->rgba[size_t(i) * 4 + 3] = uint8_t((packed >> 24) & 0xFF);
+	}
+
+	return ramp;
+}
+
+// Sets a quad's colours and gradient type for `fill` spanning the box (x0, y0)
+// - (x1, y1), and returns the per-corner gradient coordinates.
+GradientFn fillAttrs(const Fill &fill, const ImageAtlas &images, float x0, float y0, float x1, float y1, QuadAttrs &a)
+{
+	a.color = fill.color;
+	a.color2 = fill.color2;
+
+	if (fill.type == FillType::Source) {
+		// The pixel shader reads the source's picture at the pixel's own
+		// position; nothing to interpolate.
+		a.gradientType = 5;
+		return nullptr;
+	}
+
+	GradientFn gradient = screenGradient(fill, x0, y0, x1, y1, a.gradientType);
+
+	if (a.gradientType != 0 && usesRamp(fill)) {
+		if (const auto slot = images.slot(rampKey(fill))) {
+			// The ramp is one row of texels; sample its centre line, from the
+			// first texel's centre to the last one's.
+			const float texel = (slot->u1 - slot->u0) / float(kRampWidth);
+
+			a.gradientType += 2;
+			a.color2 = Rgba{slot->u0 + texel * 0.5f, slot->u1 - texel * 0.5f, (slot->v0 + slot->v1) * 0.5f,
+					0.0f};
+		}
+	}
+
+	return gradient;
+}
+
+// How much of what is behind a fill it hides, for the knock-outs.
+float fillCover(const Fill &fill)
+{
+	if (fill.type == FillType::Solid)
+		return fill.color.a;
+
+	if (fill.type == FillType::Source)
+		return fill.color.a;
+
+	float alpha = 0.0f;
+
+	for (const auto &stop : gradientStops(fill))
+		alpha = std::max(alpha, stop.second.a);
+
+	return alpha;
+}
+
+// The effect's natural size for a glyph `size` pixels tall, times its strength.
+void effectAttrs(const EffectSpec &effect, float size, uint32_t ordinal, QuadAttrs &a)
+{
+	if (effect.kind == Effect::None)
+		return;
+
+	constexpr float kTau = 2.0f * kPi;
+
+	float amount = effect.strength;
+	float rate = 1.0f;
+
+	switch (effect.kind) {
+	case Effect::Wave:
+		amount *= 0.12f * size;
+		break;
+	case Effect::Pulse:
+		amount *= 0.08f;
+		break;
+	case Effect::Shake:
+		amount *= 0.035f * size;
+		rate = 6.0f;
+		break;
+	case Effect::Glitch:
+		amount *= 0.12f * size;
+		rate = 8.0f;
+		break;
+	case Effect::Rainbow:
+		rate = 0.25f;
+		break;
+	case Effect::Shimmer:
+		amount *= 0.75f;
+		rate = 0.5f;
+		break;
+	case Effect::None:
+		break;
+	}
+
+	a.effectCode = float(int(effect.kind)) + 16.0f * float(ordinal % 65536u);
+	a.effectAmount = amount;
+	a.effectOmega = effect.speed * rate * kTau;
+	a.effectPhase = float(ordinal) * effect.spread * kTau;
+}
+
 // A COLR layer's gradient, defined in the glyph's own em space.
 GradientFn layerGradient(const LayerPaint &paint, int &type)
 {
@@ -321,6 +482,78 @@ void append(GeometryBuffers &dst, const GeometryBuffers &src)
 
 } // namespace
 
+std::vector<std::pair<float, Rgba>> gradientStops(const Fill &fill)
+{
+	std::vector<std::pair<float, Rgba>> out;
+
+	out.push_back({0.0f, fill.color});
+
+	// Middle stops: "colour[@position]" separated by spaces or commas.
+	std::vector<std::pair<float, Rgba>> middle;
+	std::vector<bool> placed;
+
+	std::string list = fill.stops;
+	std::replace(list.begin(), list.end(), ',', ' ');
+
+	std::istringstream words(list);
+	std::string word;
+
+	while (words >> word) {
+		const size_t at = word.find('@');
+		const auto color = parseColor(word.substr(0, at));
+
+		if (!color)
+			continue;
+
+		float position = -1.0f;
+
+		if (at != std::string::npos) {
+			char *end = nullptr;
+			const std::string text = word.substr(at + 1);
+			const float value = std::strtof(text.c_str(), &end);
+
+			if (end && *end == '\0')
+				position = std::clamp(value > 1.0f ? value / 100.0f : value, 0.0f, 1.0f);
+		}
+
+		middle.push_back({position, *color});
+	}
+
+	// Unplaced stops spread evenly between their placed neighbours.
+	const size_t n = middle.size();
+
+	for (size_t i = 0; i < n; i++) {
+		if (middle[i].first >= 0.0f)
+			continue;
+
+		size_t j = i;
+
+		while (j < n && middle[j].first < 0.0f)
+			j++;
+
+		const float lo = i == 0 ? 0.0f : middle[i - 1].first;
+		const float hi = j < n ? middle[j].first : 1.0f;
+		const size_t count = j - i;
+
+		for (size_t k = 0; k < count; k++)
+			middle[i + k].first = lo + (hi - lo) * float(k + 1) / float(count + 1);
+
+		i = j;
+	}
+
+	std::stable_sort(middle.begin(), middle.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+
+	out.insert(out.end(), middle.begin(), middle.end());
+	out.push_back({1.0f, fill.color2});
+
+	return out;
+}
+
+bool usesRamp(const Fill &fill)
+{
+	return (fill.type == FillType::Linear || fill.type == FillType::Radial) && gradientStops(fill).size() > 2;
+}
+
 void GeometryBuffers::clear()
 {
 	positions.clear();
@@ -364,9 +597,28 @@ FrameRequests collectRequests(const LayoutResult &layout)
 
 	std::set<std::string> seen;
 
+	auto wantRamp = [&](const Style *style) {
+		if (!style || !usesRamp(style->fill))
+			return;
+
+		const std::string key = rampKey(style->fill);
+
+		if (seen.count(key))
+			return;
+
+		seen.insert(key);
+		out.ramps.push_back(makeRamp(style->fill));
+		out.images.push_back({key, out.ramps.back().get()});
+	};
+
+	for (const DecorationRect &d : layout.decorations)
+		wantRamp(d.style);
+
 	for (const PositionedGlyph &g : layout.glyphs) {
 		if (!g.font || !g.style)
 			continue;
+
+		wantRamp(g.style);
 
 		const std::string key = fillKey(g.font, g.glyphIndex);
 		const bool outline = wantsOutline(*g.style);
@@ -403,36 +655,48 @@ FrameRequests collectRequests(const LayoutResult &layout)
 }
 
 GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &layout, const AtlasCache &atlas,
-				     const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out)
+				     const ImageAtlas &images, const GeometryParams &params, GeometryBuffers &out,
+				     HaloLayers *halos)
 {
 	out.clear();
+
+	if (halos)
+		halos->clear();
+
+	// Soft silhouettes, by how they blur, in the order they first appear so a
+	// glow stays under a shadow as before.
+	struct PendingHalo {
+		HaloGroup group;
+		GeometryBuffers geometry;
+	};
+
+	std::vector<PendingHalo> pendingHalos;
+
+	auto haloFor = [&](float reach, float gain, float alpha) -> GeometryBuffers & {
+		// Reaches a quarter pixel apart blur alike.
+		const float key = std::round(reach * 4.0f) / 4.0f;
+
+		for (PendingHalo &pending : pendingHalos) {
+			if (pending.group.reach == key && pending.group.gain == gain) {
+				pending.group.alphaCap = std::max(pending.group.alphaCap, alpha);
+				return pending.geometry;
+			}
+		}
+
+		PendingHalo pending;
+		pending.group.reach = key;
+		pending.group.gain = gain;
+		pending.group.alphaCap = alpha;
+		pendingHalos.push_back(std::move(pending));
+
+		return pendingHalos.back().geometry;
+	};
 
 	GeometryStats stats;
 	ShapeCache &cache = ShapeCache::instance();
 
 	const MotionSpec &motion = doc.motion;
 
-	// Layout is y-down, so "up" is -y.
-	float dirX = 0.0f;
-	float dirY = -1.0f;
-
-	switch (motion.direction) {
-	case MotionDirection::Up:
-		break;
-	case MotionDirection::Down:
-		dirY = 1.0f;
-		break;
-	case MotionDirection::Left:
-		dirX = -1.0f;
-		dirY = 0.0f;
-		break;
-	case MotionDirection::Right:
-		dirX = 1.0f;
-		dirY = 0.0f;
-		break;
-	}
-
-	const float omega = motion.speed * 2.0f * kPi;
 	const float blurPixels = motion.motion == Motion::Blur ? std::max(motion.param, 0.0f) : 0.0f;
 
 	const bool hasChange = params.changedStart < params.changedEnd;
@@ -464,15 +728,8 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 	auto motionAttrs = [&](QuadAttrs &a, uint32_t ordinal, uint32_t word, uint32_t line, uint32_t offset) {
 		const float index = staggerIndexOf(ordinal, word, line, motion.order);
 
-		a.motionMode = float(int(motion.motion));
-		a.motionParam = motion.param;
-		a.startAll = index * motion.stagger;
-		a.duration = std::max(motion.duration, 1e-4f);
 		a.staggerIndex = index;
 		a.startChanged = isChanged(offset) ? (index - firstChanged) * motion.stagger : -1.0f;
-		a.dirX = dirX;
-		a.dirY = dirY;
-		a.omega = omega;
 	};
 
 	// The gradient's box when it spans the whole text.
@@ -495,6 +752,7 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 
 		QuadAttrs base;
 		motionAttrs(base, g.ordinal, g.wordIndex, g.lineIndex, g.textOffset);
+		effectAttrs(style.effect, size, g.ordinal, base);
 
 		const auto fillShape = shapes.hasFill() ? atlas.shape(fillKey(g.font, g.glyphIndex)) : std::nullopt;
 
@@ -505,20 +763,24 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				strokeKey(g.font, g.glyphIndex, strokeWidthEm(style, size), style.outline.join));
 
 		// Fill alpha decides how much a fill hides what is behind it.
-		const float fillAlpha = style.fill.type == FillType::Solid
-						? style.fill.color.a
-						: std::max(style.fill.color.a, style.fill.color2.a);
+		const float fillAlpha = fillCover(style.fill);
 
-		// ---- shadow ----------------------------------------------------
-		if (style.shadow.enabled && size > 0.0f) {
-			const float sx = style.shadow.offsetX;
-			const float sy = style.shadow.offsetY;
+		// ---- glow and shadow ----------------------------------------------
+		//
+		// Both are the glyph's silhouette, drawn behind it and knocked out
+		// where the glyph sits. A soft one is a halo: drawn sharp into its
+		// group and blurred as an image (see HaloLayers). A hard one is a quad
+		// in the main geometry, knocked out by the glyph in its own shader.
+		auto silhouette = [&](float sx, float sy, const Rgba &color, float reach, float gain) {
+			const bool soft = halos && reach >= kMinHaloReach;
+			GeometryBuffers &target = soft ? haloFor(reach, gain, color.a) : shadows;
 
 			if (fillShape) {
 				QuadAttrs a = base;
 
 				a.kind = QuadKind::Shadow;
-				a.color = style.shadow.color;
+				a.color = color;
+				a.color2 = Rgba{reach, gain, 0.0f, 0.0f};
 				shapeAttrs(*fillShape, a.aBand, a.aShape);
 
 				EmBox box = boxOf(*fillShape);
@@ -530,16 +792,17 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				}
 
 				// The glyph in front sits (sx, sy) pixels back from the
-				// shadow, which in em space is (sx, -sy) / size.
+				// silhouette, which in em space is (sx, -sy) / size.
 				a.knockA = shapes.isColor() ? 1.0f : fillAlpha;
 				a.knockOffsetX = sx / size;
 				a.knockOffsetY = -sy / size;
 
-				const auto corners = glyphCorners(box, margin, g.x + sx, g.y + sy, size);
+				const auto corners =
+					glyphCorners(box, aaMarginEm(size, blurPixels), g.x + sx, g.y + sy, size);
 
-				emit(shadows, corners, a, nullptr);
-				stats.ink.add(g.x + sx + box.x0 * size, g.y + sy - box.y1 * size,
-					      g.x + sx + box.x1 * size, g.y + sy - box.y0 * size);
+				emit(target, corners, a, nullptr);
+				stats.ink.add(g.x + sx + box.x0 * size - reach, g.y + sy - box.y1 * size - reach,
+					      g.x + sx + box.x1 * size + reach, g.y + sy - box.y0 * size + reach);
 			} else if (shapes.bitmap) {
 				if (const auto slot = images.slot(imageKey(g.font, g.glyphIndex))) {
 					const BitmapGlyph &bmp = *shapes.bitmap;
@@ -548,15 +811,24 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 
 					QuadAttrs a = base;
 					a.kind = QuadKind::ImageTint;
-					a.color = style.shadow.color;
+					a.color = color;
 
-					emit(shadows,
+					emit(target,
 					     rectCorners(x0, y0, x0 + bmp.emWidth * size, y0 + bmp.emHeight * size,
 							 slot->u0, slot->v0, slot->u1, slot->v1),
 					     a, nullptr);
+					stats.ink.add(x0 - reach, y0 - reach, x0 + bmp.emWidth * size + reach,
+						      y0 + bmp.emHeight * size + reach);
 				}
 			}
-		}
+		};
+
+		if (style.glow.enabled && style.glow.size > 0.0f && size > 0.0f)
+			silhouette(0.0f, 0.0f, style.glow.color, style.glow.size, 2.0f);
+
+		if (style.shadow.enabled && size > 0.0f)
+			silhouette(style.shadow.offsetX, style.shadow.offsetY, style.shadow.color,
+				   std::max(style.shadow.blur, 0.0f), 1.0f);
 
 		// ---- outline -----------------------------------------------------
 		if (strokeShape && fillShape) {
@@ -593,9 +865,7 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 				GradientFn gradient;
 
 				if (paint.kind == LayerPaint::Kind::Foreground) {
-					a.color = style.fill.color;
-					a.color2 = style.fill.color2;
-					gradient = screenGradient(style.fill, 0.0f, 0.0f, boxX1, boxY1, a.gradientType);
+					gradient = fillAttrs(style.fill, images, 0.0f, 0.0f, boxX1, boxY1, a);
 				} else {
 					a.color = paint.color;
 					a.color2 = paint.color2;
@@ -626,18 +896,16 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 			QuadAttrs a = base;
 
 			a.kind = QuadKind::Fill;
-			a.color = style.fill.color;
-			a.color2 = style.fill.color2;
 			shapeAttrs(*fillShape, a.aBand, a.aShape);
 
 			const EmBox box = boxOf(*fillShape);
 			GradientFn gradient;
 
 			if (style.fill.span == GradientSpan::Character)
-				gradient = screenGradient(style.fill, g.x + box.x0 * size, g.y - box.y1 * size,
-							  g.x + box.x1 * size, g.y - box.y0 * size, a.gradientType);
+				gradient = fillAttrs(style.fill, images, g.x + box.x0 * size, g.y - box.y1 * size,
+						     g.x + box.x1 * size, g.y - box.y0 * size, a);
 			else
-				gradient = screenGradient(style.fill, 0.0f, 0.0f, boxX1, boxY1, a.gradientType);
+				gradient = fillAttrs(style.fill, images, 0.0f, 0.0f, boxX1, boxY1, a);
 
 			emit(fills, glyphCorners(box, margin, g.x, g.y, size), a, gradient);
 			stats.ink.add(g.x + box.x0 * size, g.y - box.y1 * size, g.x + box.x1 * size,
@@ -652,6 +920,7 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 
 		QuadAttrs base;
 		motionAttrs(base, d.ordinal, d.wordIndex, d.lineIndex, d.textOffset);
+		effectAttrs(d.style->effect, d.style->sizePx, d.ordinal, base);
 
 		const float x1 = d.x + d.width;
 		const float y1 = d.y + d.height;
@@ -672,13 +941,10 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 		QuadAttrs a = base;
 
 		a.kind = QuadKind::Solid;
-		a.color = d.style->fill.color;
-		a.color2 = d.style->fill.color2;
 
-		const GradientFn gradient =
-			d.style->fill.span == GradientSpan::Character
-				? screenGradient(d.style->fill, d.x, d.y, x1, y1, a.gradientType)
-				: screenGradient(d.style->fill, 0.0f, 0.0f, boxX1, boxY1, a.gradientType);
+		const GradientFn gradient = d.style->fill.span == GradientSpan::Character
+						    ? fillAttrs(d.style->fill, images, d.x, d.y, x1, y1, a)
+						    : fillAttrs(d.style->fill, images, 0.0f, 0.0f, boxX1, boxY1, a);
 
 		emit(bars, rectCorners(d.x, d.y, x1, y1), a, gradient);
 		stats.ink.add(d.x, d.y, x1, y1);
@@ -688,6 +954,16 @@ GeometryStats GeometryBuilder::build(const Document &doc, const LayoutResult &la
 	append(out, outlines);
 	append(out, fills);
 	append(out, bars);
+
+	if (halos) {
+		for (PendingHalo &pending : pendingHalos) {
+			pending.group.firstIndex = uint32_t(halos->geometry.indices.size());
+			pending.group.indexCount = uint32_t(pending.geometry.indices.size());
+
+			append(halos->geometry, pending.geometry);
+			halos->groups.push_back(pending.group);
+		}
+	}
 
 	return stats;
 }
