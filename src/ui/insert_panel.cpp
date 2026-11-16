@@ -316,7 +316,12 @@ void InsertPanel::addOwnGroup(const QString &title, const VariableMap &values, b
 		QMetaObject::invokeMethod(this, [this]() { rebuildOwnValues(); }, Qt::QueuedConnection);
 	};
 
-	for (const auto &[name, value] : values) {
+	for (const auto &entry : values) {
+		// Plain copies: the lambdas below capture them, and a structured
+		// binding cannot be captured under OpenMP.
+		const std::string name = entry.first;
+		const std::string value = entry.second;
+
 		auto *line = new QWidget(_ownHolder);
 		auto *layout = new QHBoxLayout(line);
 		layout->setContentsMargins(0, 0, 4, 0);
