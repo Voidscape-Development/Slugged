@@ -24,6 +24,145 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 namespace slugged {
 
+namespace {
+
+// How much room the laid-out lines take, whatever box they were laid out in.
+bool fitsIn(const LayoutResult &layout, float width, float height)
+{
+	if (layout.lines.empty())
+		return true;
+
+	float widest = 0.0f;
+
+	for (const LineInfo &line : layout.lines)
+		widest = std::max(widest, line.width);
+
+	const float top = layout.lines.front().baselineY - layout.lines.front().ascent;
+	const float bottom = layout.lines.back().baselineY + layout.lines.back().descent;
+
+	return widest <= width + 0.5f && bottom - top <= height + 0.5f;
+}
+
+// Shrinks and then cuts `doc` until it fits the box, as its fit settings allow.
+// Returns the layout of what fits best; `doc` is left as what was laid out.
+LayoutResult fitToBox(Document &doc, float wrapWidth, float width, float height)
+{
+	LayoutResult layout = Layout::run(doc, wrapWidth, height);
+
+	if (fitsIn(layout, width, height))
+		return layout;
+
+	if (doc.fit.shrink) {
+		const Document original = doc;
+
+		auto attempt = [&](float scale, LayoutResult &out) {
+			doc = original;
+			doc.scaleSizes(scale);
+			out = Layout::run(doc, wrapWidth, height);
+
+			return fitsIn(out, width, height);
+		};
+
+		// Text that does not wrap shrinks in proportion, so the ratio of the
+		// box to the text is close to the answer; wrapped text reflows as it
+		// shrinks, so search from there.
+		float widest = 1.0f;
+
+		for (const LineInfo &line : layout.lines)
+			widest = std::max(widest, line.width);
+
+		const float tall = std::max(1.0f, layout.lines.back().baselineY + layout.lines.back().descent -
+							  (layout.lines.front().baselineY - layout.lines.front().ascent));
+
+		float lo = std::clamp(doc.fit.minScale, 0.01f, 1.0f);
+		float hi = 1.0f;
+		float best = -1.0f;
+		LayoutResult bestLayout;
+		LayoutResult trial;
+
+		const float guess = std::clamp(std::min(width / widest, height / tall), lo, hi);
+
+		if (attempt(guess, trial)) {
+			best = guess;
+			bestLayout = std::move(trial);
+			lo = guess;
+		} else {
+			hi = guess;
+		}
+
+		for (int i = 0; i < 7 && hi - lo > 0.005f; i++) {
+			const float mid = (lo + hi) * 0.5f;
+
+			if (attempt(mid, trial)) {
+				best = mid;
+				bestLayout = std::move(trial);
+				lo = mid;
+			} else {
+				hi = mid;
+			}
+		}
+
+		if (best > 0.0f) {
+			doc = original;
+			doc.scaleSizes(best);
+			return bestLayout;
+		}
+
+		// Not even the smallest allowed size fits: keep that size, and let
+		// the ellipsis deal with the rest.
+		attempt(std::clamp(original.fit.minScale, 0.01f, 1.0f), layout);
+	}
+
+	if (!doc.fit.ellipsis)
+		return layout;
+
+	// Keep as many characters as fit with an ellipsis after them.
+	const Document whole = doc;
+	const std::string plain = whole.plainText();
+
+	std::vector<size_t> starts;
+
+	for (size_t i = 0; i < plain.size(); i++)
+		if ((uint8_t(plain[i]) & 0xC0) != 0x80)
+			starts.push_back(i);
+
+	auto cutAt = [&](size_t count, LayoutResult &out) {
+		size_t cut = count < starts.size() ? starts[count] : plain.size();
+
+		while (cut > 0 && (plain[cut - 1] == ' ' || plain[cut - 1] == '\n'))
+			cut--;
+
+		doc = whole;
+		doc.replaceText(cut, plain.size(), "\xE2\x80\xA6");
+		out = Layout::run(doc, wrapWidth, height);
+
+		return fitsIn(out, width, height);
+	};
+
+	// The most characters that fit: `kept` always fits (or is zero).
+	size_t kept = 0;
+	size_t lo = 1;
+	size_t hi = starts.size();
+	LayoutResult trial;
+
+	while (lo <= hi) {
+		const size_t mid = lo + (hi - lo) / 2;
+
+		if (cutAt(mid, trial)) {
+			kept = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	cutAt(kept, trial);
+
+	return trial;
+}
+
+} // namespace
+
 FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 {
 	FrameOutput out;
@@ -43,8 +182,18 @@ FrameOutput buildFrame(const FrameInput &input, FrameState &state)
 
 	auto guard = FontManager::instance().lock();
 
+	// Text too big for a fixed box shrinks, or is cut short, when asked to.
+	// Scrolling text is meant to be bigger than its box.
+	Document fitted;
+	const bool fit = fixed && !doc.scroll.enabled && (doc.fit.shrink || doc.fit.ellipsis) && innerWidth > 0.0f &&
+			 innerHeight > 0.0f;
+
+	if (fit)
+		fitted = doc;
+
 	const LayoutResult layout =
-		Layout::run(doc, fixed && !horizontalScroll ? innerWidth : 0.0f, fixed ? innerHeight : 0.0f);
+		fit ? fitToBox(fitted, innerWidth, innerWidth, innerHeight)
+		    : Layout::run(doc, fixed && !horizontalScroll ? innerWidth : 0.0f, fixed ? innerHeight : 0.0f);
 
 	const FrameRequests requests = collectRequests(layout);
 

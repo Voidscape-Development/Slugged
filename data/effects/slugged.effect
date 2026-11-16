@@ -42,6 +42,15 @@
  *              a character that did not change)
  *   TEXCOORD9  direction.xy, radians per second, knock-out alpha of shape B
  *   TEXCOORD10 gradient u, v; em offset from a shadow to the glyph casting it
+ *   TEXCOORD11 effect: kind + 16 * seed, amount, radians per second, phase
+ *
+ * For a shadow (or glow) quad, TEXCOORD6 carries its softness instead of a
+ * colour: the width of the edge's fade in pixels, and a gain applied to the
+ * coverage, so a glow can be solid at the letters' edge and fade outward.
+ *
+ * For a gradient drawn from a ramp in the image atlas (types 3 and 4: one with
+ * stops between its ends), TEXCOORD6 carries the ramp's u at either end and its
+ * v instead of an end colour.
  *
  * Quad kinds:
  *
@@ -52,6 +61,9 @@
  *   IMAGE      a colour bitmap glyph
  *   IMAGE_TINT a colour bitmap's silhouette in a flat colour (its shadow)
  *   ROUNDRECT  the background
+ *
+ * Gradient types: 0 none, 1 linear, 2 radial, 3 linear ramp, 4 radial ramp,
+ * 5 another source's picture (source_tex placed at source_rect).
  *
  * The knock-outs are what make translucency correct without an offscreen
  * pass: a letter at 50% opacity mid-fade must not show its own outline or
@@ -93,6 +105,23 @@ uniform float2 scroll_offset;
 /* Source-space rectangle outside which nothing draws: x0, y0, x1, y1. */
 uniform float4 clip_rect;
 
+/* Seconds on the effects' clock, which never resets on a replay. */
+uniform float loop_time;
+
+/* Another source's picture, for text filled with it, and where it sits in
+ * source space (x0, y0, x1, y1). Premultiplied, as OBS renders it. */
+uniform texture2d source_tex;
+uniform float4 source_rect;
+
+/* 1 when source_tex holds a picture. */
+uniform float source_ready;
+
+/* 1 to fill every letter with source_tex: the overlay filter's mask mode. */
+uniform float fill_all_source;
+
+/* Horizontal extent of the text, which a shimmer sweeps across. */
+uniform float2 shimmer_range;
+
 sampler_state point_clamp {
 	Filter    = Point;
 	AddressU  = Clamp;
@@ -133,6 +162,7 @@ struct VertIn {
 	float4 pivot     : TEXCOORD8;
 	float4 motion    : TEXCOORD9;
 	float4 grad      : TEXCOORD10;
+	float4 effect    : TEXCOORD11;
 };
 
 struct VertOut {
@@ -146,7 +176,8 @@ struct VertOut {
 	float4 endColor  : TEXCOORD6;
 	float4 grad      : TEXCOORD7;
 	float4 misc      : TEXCOORD8; /* fade, blur, code, knock A */
-	float4 knock     : TEXCOORD9; /* knock B */
+	float4 knock     : TEXCOORD9; /* knock B, position before scrolling */
+	float4 fxv       : TEXCOORD10; /* effect kind, amount, angle, glitch tint */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -383,6 +414,24 @@ float slug_Optional(float2 renderCoord, float2 pixelsPerEm, float4 bandTransform
 #define MOTION_BOUNCE     8
 
 #define SLUG_DEG_TO_RAD 0.017453292
+#define SLUG_TAU 6.2831853
+
+/*
+ * Effects never settle: they run on loop_time for as long as the text is shown.
+ * Must stay in sync with enum class Effect in src/core/types.hpp.
+ */
+#define EFFECT_NONE    0
+#define EFFECT_WAVE    1
+#define EFFECT_PULSE   2
+#define EFFECT_SHAKE   3
+#define EFFECT_GLITCH  4
+#define EFFECT_RAINBOW 5
+#define EFFECT_SHIMMER 6
+
+float slug_Hash(float x)
+{
+	return frac(sin(x * 12.9898) * 43758.5453);
+}
 
 /* The standard back-out curve: passes 1 at about 70% and settles back. */
 float slug_BackOut(float t)
@@ -465,6 +514,54 @@ VertOut VSSlug(VertIn v)
 		fade = min(phase * 3.0, 1.0);
 	}
 
+	/* ---- effects ---- */
+	float effectSeed = floor(v.effect.x / 16.0 + 0.001);
+	float effectKind = v.effect.x - effectSeed * 16.0;
+	float effectAmount = v.effect.y;
+	float effectAngle = loop_time * v.effect.z - v.effect.w;
+	float glitchTint = 0.0;
+
+	if (effectKind < 0.5) {
+		/* EFFECT_NONE */
+	} else if (effectKind < 1.5) {
+		/* EFFECT_WAVE: bob up and down, each character a little behind the last. */
+		pos.y -= sin(effectAngle) * effectAmount;
+	} else if (effectKind < 2.5) {
+		/* EFFECT_PULSE: breathe about each glyph's centre. */
+		float s = 1.0 + effectAmount * sin(effectAngle);
+
+		pos.xy = v.pivot.xy + (pos.xy - v.pivot.xy) * s;
+	} else if (effectKind < 3.5) {
+		/* EFFECT_SHAKE: two incommensurate sines per axis read as noise. */
+		float t = loop_time * v.effect.z + effectSeed * 1.7;
+		float2 n = float2(sin(t) + 0.5 * sin(t * 2.31 + effectSeed * 3.1),
+				  cos(t * 1.27 + effectSeed * 2.3) + 0.5 * sin(t * 2.93 + effectSeed * 0.7)) / 1.5;
+
+		pos.xy += n * effectAmount;
+	} else if (effectKind < 4.5) {
+		/* EFFECT_GLITCH: in some time slots a character jumps sideways, dims
+		 * and takes a tint. The rate sets how many slots a second there are. */
+		float slot = floor(loop_time * v.effect.z / SLUG_TAU);
+		float roll = slug_Hash(effectSeed * 13.7 + slot * 1.31);
+
+		if (roll > 0.8) {
+			float jump = slug_Hash(effectSeed * 7.3 + slot * 3.7) - 0.5;
+
+			pos.x += jump * 2.0 * effectAmount;
+			pos.y += (slug_Hash(effectSeed * 2.1 + slot * 5.3) - 0.5) * 0.3 * effectAmount;
+			fade *= roll > 0.93 ? 0.35 : 1.0;
+			glitchTint = jump < 0.0 ? -1.0 : 1.0;
+		}
+	} else if (effectKind < 5.5) {
+		/* EFFECT_RAINBOW: colour only; the pixel shader uses the angle. */
+	} else {
+		/* EFFECT_SHIMMER: a sweep across the whole text, so no per-character
+		 * phase. */
+		effectAngle = loop_time * v.effect.z;
+	}
+
+	float2 unscrolled = pos.xy;
+
 	pos.xy += scroll_offset;
 
 	/* libobs never writes POSITION.w; an orthographic transform of w = 0
@@ -479,7 +576,8 @@ VertOut VSSlug(VertIn v)
 	o.endColor    = v.endColor;
 	o.grad      = v.grad;
 	o.misc      = float4(fade, blur, v.em.z, v.em.w);
-	o.knock     = float4(v.motion.w, 0.0, 0.0, 0.0);
+	o.knock     = float4(v.motion.w, unscrolled, 0.0);
+	o.fxv       = float4(effectKind, effectAmount, effectAngle, glitchTint);
 
 	return o;
 }
@@ -493,6 +591,20 @@ float sd_RoundBox(float2 p, float2 halfSize, float radius)
 	float2 q = abs(p) - halfSize + radius;
 
 	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float3 slug_Hue(float h)
+{
+	return saturate(abs(frac(h + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+}
+
+/* Another source's picture at a source-space position, straight alpha. */
+float4 slug_SourceColor(float2 at)
+{
+	float2 size = max(source_rect.zw - source_rect.xy, float2(1e-3, 1e-3));
+	float4 texel = source_tex.SampleLevel(linear_clamp, (at - source_rect.xy) / size, 0.0);
+
+	return float4(texel.a > 1e-4 ? texel.rgb / texel.a : float3(0.0, 0.0, 0.0), texel.a);
 }
 
 float4 PSSlug(VertOut f) : TARGET
@@ -521,12 +633,50 @@ float4 PSSlug(VertOut f) : TARGET
 	if (src.x < clip_rect.x || src.y < clip_rect.y || src.x > clip_rect.z || src.y > clip_rect.w)
 		return float4(0.0, 0.0, 0.0, 0.0);
 
+	float2 unscrolled = f.knock.yz;
+	bool letter = kind < KIND_FILL + 0.5 || (kind > KIND_SOLID - 0.5 && kind < KIND_SOLID + 0.5);
+
 	float4 color = f.color;
 
-	if (gradType > 0.5) {
+	if (gradType > 4.5 || (fill_all_source > 0.5 && letter)) {
+		/* Another source's picture, keeping the fill's own opacity. */
+		if (source_ready > 0.5) {
+			float4 picture = slug_SourceColor(unscrolled);
+
+			color = float4(picture.rgb, picture.a * f.color.a);
+		}
+	} else if (gradType > 2.5) {
+		/* A ramp in the image atlas: endColor holds u at each end, and v. */
+		float t = clamp(gradType < 3.5 ? f.grad.x : length(f.grad.xy), 0.0, 1.0);
+
+		color = image_tex.SampleLevel(linear_clamp, float2(lerp(f.endColor.x, f.endColor.y, t), f.endColor.z), 0.0);
+	} else if (gradType > 0.5) {
 		float t = gradType < 1.5 ? f.grad.x : length(f.grad.xy);
 
 		color = lerp(f.color, f.endColor, clamp(t, 0.0, 1.0));
+	}
+
+	/* Colour effects touch the letters only, not their outline or shadow. */
+	if (letter) {
+		float effectKind = f.fxv.x;
+
+		if (effectKind > 4.5 && effectKind < 5.5) {
+			/* EFFECT_RAINBOW: the angle walks the hue wheel. */
+			color.rgb = lerp(color.rgb, slug_Hue(f.fxv.z / SLUG_TAU), saturate(f.fxv.y));
+		} else if (effectKind > 5.5) {
+			/* EFFECT_SHIMMER: a slanted band of light crossing the text, then a
+			 * pause before the next pass. */
+			float width = max(shimmer_range.y - shimmer_range.x, 1.0);
+			float band = max(width * 0.12, 8.0);
+			float sweep = frac(f.fxv.z / SLUG_TAU) * 1.6 - 0.3;
+			float at = shimmer_range.x + sweep * (width + 2.0 * band) - band;
+			float k = saturate(1.0 - abs(unscrolled.x + 0.35 * unscrolled.y - at) / band);
+
+			color.rgb = lerp(color.rgb, float3(1.0, 1.0, 1.0), k * k * (3.0 - 2.0 * k) * saturate(f.fxv.y));
+		} else if (abs(f.fxv.w) > 0.5) {
+			/* EFFECT_GLITCH's tint, red one way and cyan the other. */
+			color.rgb = lerp(color.rgb, f.fxv.w > 0.0 ? float3(1.0, 0.1, 0.35) : float3(0.1, 0.95, 1.0), 0.6);
+		}
 	}
 
 	float coverage = 1.0;
@@ -541,11 +691,15 @@ float4 PSSlug(VertOut f) : TARGET
 	} else if (kind < KIND_SHADOW + 0.5) {
 		float2 glyph = em + f.grad.zw;
 
-		float shadowCoverage = max(slug_Render(em, ppe, f.aBand, f.aShape), slug_Optional(em, ppe, f.bBand, f.bShape));
+		/* The silhouette's edge fades over endColor.x pixels; the glyph that
+		 * knocks it out keeps its own sharp edge. */
+		float2 soft = pixelsPerEm / max(max(blur, f.endColor.x), 1.0);
+
+		float shadowCoverage = max(slug_Render(em, soft, f.aBand, f.aShape), slug_Optional(em, soft, f.bBand, f.bShape));
 		float inFront = max(slug_Render(glyph, ppe, f.aBand, f.aShape) * knockA,
 				    slug_Optional(glyph, ppe, f.bBand, f.bShape) * knockB);
 
-		coverage = shadowCoverage * (1.0 - inFront);
+		coverage = saturate(shadowCoverage * max(f.endColor.y, 1e-3)) * (1.0 - inFront);
 	} else if (kind < KIND_SOLID + 0.5) {
 		coverage = 1.0;
 	} else if (kind < KIND_IMAGE + 0.5) {

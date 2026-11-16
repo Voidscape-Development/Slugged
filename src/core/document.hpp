@@ -90,6 +90,13 @@ struct Document {
 	Background background;
 	MotionSpec motion;
 	ScrollSpec scroll;
+	RotateSpec rotate;
+
+	// Only meaningful when sizeMode == Fixed.
+	FitSpec fit;
+
+	// The OBS source whose picture fills text styled with FillType::Source.
+	std::string fillSource;
 
 	// Whole-source opacity, applied once in the pixel shader.
 	float opacity = 1.0f;
@@ -143,6 +150,12 @@ struct Document {
 	void applyParagraph(size_t start, size_t end, const ParagraphOverride &delta);
 	void applyBaseParagraph(const ParagraphOverride &delta);
 	ParagraphStyle paragraphAt(size_t offset) const;
+
+	// Multiplies every size in the text -- font sizes, spacing, outline and
+	// shadow distances, paragraph spacing -- by `factor`, base style and runs
+	// alike, so the text looks the same only smaller. Used to shrink text into
+	// a fixed box.
+	void scaleSizes(float factor);
 
 	// Merges adjacent runs with identical overrides and drops empty runs.
 	void normalize();

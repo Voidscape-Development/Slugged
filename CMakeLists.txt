@@ -209,6 +209,8 @@ target_sources(
     src/obs/slugged_source.hpp
     src/obs/start_points.cpp
     src/obs/start_points.hpp
+    src/obs/websocket.cpp
+    src/obs/websocket.hpp
 )
 
 if(ENABLE_QT)

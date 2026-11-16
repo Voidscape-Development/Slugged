@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "obs/saved_styles.hpp"
 #include "obs/settings.hpp"
 #include "obs/slugged_source.hpp"
+#include "obs/websocket.hpp"
 #include "render/rebuild_worker.hpp"
 #include "render/shape_cache.hpp"
 #include "text/font_manager.hpp"
@@ -128,6 +129,9 @@ void obs_module_post_load(void)
 {
 	// The Tools menu exists once the frontend is up.
 	slugged::editor::registerTools();
+
+	// So does obs-websocket, if it is installed.
+	slugged::websocket::registerVendor();
 }
 
 void obs_module_unload(void)

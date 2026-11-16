@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace slugged {
@@ -48,6 +49,7 @@ struct GeometryBuffers {
 		Pivot,     // pivot.xy, stagger index, start (changed characters only)
 		Direction, // direction.xy, radians per second, shape B's knock-out alpha
 		Gradient,  // gradient u, v; shadow-to-glyph offset in em
+		Effect,    // effect kind + 16 * seed, amount, radians per second, phase
 		AttributeCount,
 	};
 
@@ -80,7 +82,19 @@ enum class QuadKind {
 struct FrameRequests {
 	std::vector<ShapeRequest> shapes;
 	std::vector<ImageAtlas::Request> images;
+
+	// Gradient ramps the image requests point into: a gradient with stops
+	// between its ends is drawn from a strip of colour in the image atlas.
+	std::vector<std::unique_ptr<BitmapGlyph>> ramps;
 };
+
+// A gradient's stops, ends included, sorted by position. Two stops for a plain
+// two-colour gradient.
+std::vector<std::pair<float, Rgba>> gradientStops(const Fill &fill);
+
+// Whether a fill is drawn from a ramp in the image atlas rather than by
+// blending its two end colours.
+bool usesRamp(const Fill &fill);
 
 FrameRequests collectRequests(const LayoutResult &layout);
 

@@ -34,6 +34,9 @@ namespace slugged {
 namespace settings {
 
 const char *const kVariablesKey = "variables";
+const char *const kCounterVariableKey = "counter_variable";
+const char *const kCounterStepKey = "counter_step";
+const char *const kFilterModeKey = "filter_mode";
 
 namespace {
 
@@ -377,6 +380,8 @@ void writeMotion(obs_data_t *data, const MotionSpec &m, const ScrollSpec &s)
 	put(data, "motion_exit", m.exit);
 	put(data, "motion_live", m.live);
 	put(data, "motion_loop_interval", m.loopInterval);
+	put(data, "count_up", m.countUp);
+	put(data, "count_duration", m.countDuration);
 
 	put(data, "scroll", s.enabled);
 	put(data, "scroll_x", s.speedX);
@@ -406,7 +411,10 @@ void readMotion(obs_data_t *data, MotionSpec &m, ScrollSpec &s)
 	read("motion_exit", m.exit);
 	read("motion_live", m.live);
 	read("motion_loop_interval", m.loopInterval);
+	read("count_up", m.countUp);
+	read("count_duration", m.countDuration);
 
+	m.countDuration = std::clamp(m.countDuration, 0.05f, 60.0f);
 	m.duration = m.duration > 0.0f ? m.duration : 0.35f;
 	m.stagger = std::max(m.stagger, 0.0f);
 	m.speed = m.speed > 0.0f ? m.speed : 0.5f;
@@ -440,6 +448,16 @@ void writeLayout(obs_data_t *data, const Document &doc)
 
 	obs_data_set_int(data, "opacity", std::lround(doc.opacity * 100.0f));
 
+	put(data, "rotate", doc.rotate.enabled);
+	put(data, "rotate_interval", doc.rotate.interval);
+	put(data, "rotate_shuffle", doc.rotate.shuffle);
+
+	put(data, "fit_shrink", doc.fit.shrink);
+	obs_data_set_int(data, "fit_min", std::lround(doc.fit.minScale * 100.0f));
+	put(data, "fit_ellipsis", doc.fit.ellipsis);
+
+	put(data, "fill_source", doc.fillSource);
+
 	writeMotion(data, doc.motion, doc.scroll);
 }
 
@@ -463,6 +481,17 @@ void readLayout(obs_data_t *data, Document &doc)
 	get(data, "background_radius", doc.background.radius);
 
 	doc.opacity = std::clamp(float(obs_data_get_int(data, "opacity")) / 100.0f, 0.0f, 1.0f);
+
+	get(data, "rotate", doc.rotate.enabled);
+	get(data, "rotate_interval", doc.rotate.interval);
+	get(data, "rotate_shuffle", doc.rotate.shuffle);
+	doc.rotate.interval = std::clamp(doc.rotate.interval, 0.5f, 86400.0f);
+
+	get(data, "fit_shrink", doc.fit.shrink);
+	doc.fit.minScale = std::clamp(float(obs_data_get_int(data, "fit_min")) / 100.0f, 0.05f, 1.0f);
+	get(data, "fit_ellipsis", doc.fit.ellipsis);
+
+	get(data, "fill_source", doc.fillSource);
 
 	readMotion(data, doc.motion, doc.scroll);
 }
@@ -943,6 +972,20 @@ void defaults(obs_data_t *data)
 	putDefault(data, "motion_exit", m.exit);
 	putDefault(data, "motion_live", m.live);
 	putDefault(data, "motion_loop_interval", m.loopInterval);
+	putDefault(data, "count_up", m.countUp);
+	putDefault(data, "count_duration", m.countDuration);
+
+	putDefault(data, "rotate", doc.rotate.enabled);
+	putDefault(data, "rotate_interval", doc.rotate.interval);
+	putDefault(data, "rotate_shuffle", doc.rotate.shuffle);
+
+	putDefault(data, "fit_shrink", doc.fit.shrink);
+	obs_data_set_default_int(data, "fit_min", std::lround(doc.fit.minScale * 100.0f));
+	putDefault(data, "fit_ellipsis", doc.fit.ellipsis);
+
+	obs_data_set_default_string(data, kCounterVariableKey, "count");
+	obs_data_set_default_double(data, kCounterStepKey, 1.0);
+	obs_data_set_default_string(data, kFilterModeKey, "overlay");
 
 	const ScrollSpec &s = doc.scroll;
 
@@ -1397,6 +1440,14 @@ SourceConfig load(obs_data_t *data)
 
 	config.variablesFile.path = obs_data_get_string(data, "variables_file");
 	config.variables = variablesFromData(data, kVariablesKey);
+
+	config.counterVariable = normaliseVariableName(obs_data_get_string(data, kCounterVariableKey));
+	config.counterStep = obs_data_get_double(data, kCounterStepKey);
+
+	if (config.counterVariable.empty())
+		config.counterVariable = "count";
+
+	config.filterMode = enumFromString(obs_data_get_string(data, kFilterModeKey), FilterMode::Overlay);
 
 	return config;
 }

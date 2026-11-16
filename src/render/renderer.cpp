@@ -358,13 +358,32 @@ void Renderer::drawSlot(const Slot &slot, bool background, const DrawParams &par
 
 	gs_effect_set_vec4(param("clip_rect"), &clip);
 
+	gs_effect_set_float(param("loop_time"), params.loopTime);
+	gs_effect_set_texture(param("source_tex"), params.sourceTexture);
+	gs_effect_set_float(param("source_ready"), params.sourceTexture ? 1.0f : 0.0f);
+	gs_effect_set_float(param("fill_all_source"), params.fillAllWithSource ? 1.0f : 0.0f);
+
+	vec4 sourceRect;
+	vec4_set(&sourceRect, params.sourceX0, params.sourceY0, params.sourceX1, params.sourceY1);
+	gs_effect_set_vec4(param("source_rect"), &sourceRect);
+
+	vec2 shimmer;
+	vec2_set(&shimmer, params.shimmerX0, params.shimmerX1);
+	gs_effect_set_vec2(param("shimmer_range"), &shimmer);
+
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
-	// Straight-alpha source over destination, accumulating destination alpha
-	// so the result composites correctly when drawn into a texture (as it is
-	// once a filter is attached).
-	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	if (params.erase) {
+		// Whatever the text covers is removed from what is already there:
+		// destination scaled by one minus the text's coverage.
+		gs_blend_function_separate(GS_BLEND_ZERO, GS_BLEND_INVSRCALPHA, GS_BLEND_ZERO, GS_BLEND_INVSRCALPHA);
+	} else {
+		// Straight-alpha source over destination, accumulating destination
+		// alpha so the result composites correctly when drawn into a texture
+		// (as it is once a filter is attached).
+		gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	}
 	gs_enable_depth_test(false);
 
 	// Glyph quads are mirrored vertically to turn y-up em space into OBS's

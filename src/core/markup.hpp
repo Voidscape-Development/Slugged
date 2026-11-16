@@ -35,6 +35,11 @@ namespace slugged {
 //   [font=Inter]...[/font]
 //   [weight=600]...[/weight]
 //   [outline=#000]...[/outline]  (turns the outline on in that colour)
+//   [glow]...[/glow]  [glow=#ff0]...[/glow]
+//   [gradient=#f00,#ff0,#0f0]...[/gradient]   (left to right, any number of colours)
+//   [wave] [pulse] [shake] [glitch] [rainbow] [shimmer] ...[/shake]
+//                                (an effect; [shake=2] is twice as strong)
+//   [effect=shake]...[/effect]
 //
 // A closing tag ends the most recent open tag of the same name; [/] ends the most
 // recent tag of any kind. "[[" is a literal "[". Anything that does not parse as

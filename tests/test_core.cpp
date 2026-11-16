@@ -365,3 +365,175 @@ TEST(document_token_spans_are_in_document_offsets)
 	CHECK(spans[0] == (TokenSpan{1, 4, 1, 11}));
 	CHECK(spans[1] == (TokenSpan{5, 8, 12, 22}));
 }
+
+// ---- token filters ------------------------------------------------------------
+
+TEST(tokens_filters_reshape_values)
+{
+	TokenContext tokens;
+	tokens.set("followers", "1234567");
+	tokens.set("name", "  ada lovelace ");
+	tokens.set("score", "7");
+	tokens.set("secs", "125");
+
+	CHECK_EQ(tokens.expand("{followers|number}"), std::string("1,234,567"));
+	CHECK_EQ(tokens.expand("{followers|number:.}"), std::string("1.234.567"));
+	CHECK_EQ(tokens.expand("{followers|compact}"), std::string("1.2M"));
+	CHECK_EQ(tokens.expand("{name|trim|title}"), std::string("Ada Lovelace"));
+	CHECK_EQ(tokens.expand("{name|trim|upper}"), std::string("ADA LOVELACE"));
+	CHECK_EQ(tokens.expand("{score|pad:3}"), std::string("007"));
+	CHECK_EQ(tokens.expand("{score|add:1}"), std::string("8"));
+	CHECK_EQ(tokens.expand("{score|mul:1.5}"), std::string("10.5"));
+	CHECK_EQ(tokens.expand("{score|div:2|round:1}"), std::string("3.5"));
+	CHECK_EQ(tokens.expand("{secs|mm:ss}"), std::string("02:05"));
+	CHECK_EQ(tokens.expand("{secs|h:mm:ss}"), std::string("0:02:05"));
+	CHECK_EQ(tokens.expand("{name|trim|truncate:5}"), std::string("ada \xE2\x80\xA6"));
+	CHECK_EQ(tokens.expand("{score} {score|plural:life,lives}"), std::string("7 lives"));
+
+	tokens.set("score", "1");
+	CHECK_EQ(tokens.expand("{score|plural:life,lives}"), std::string("life"));
+}
+
+TEST(tokens_default_fills_in_a_missing_value)
+{
+	TokenContext tokens;
+
+	CHECK_EQ(tokens.expand("{song|default:Nothing playing}"), std::string("Nothing playing"));
+	CHECK_EQ(tokens.expand("{song}"), std::string("{song}"));
+
+	tokens.set("song", "");
+	CHECK_EQ(tokens.expand("{song|default:Quiet}"), std::string("Quiet"));
+
+	tokens.set("song", "Hello");
+	CHECK_EQ(tokens.expand("{song|default:Quiet|upper}"), std::string("HELLO"));
+
+	// A default is something written, so it counts as content.
+	CHECK_EQ(tokens.expandContent("{missing|default:x}"), std::string("x"));
+}
+
+TEST(tokens_filters_on_live_values_stay_live)
+{
+	TokenContext tokens;
+	tokens.setTimer(75.0f);
+
+	CHECK_EQ(tokens.expand("{timer|mm:ss}"), std::string("01:15"));
+	CHECK_EQ(tokens.expandContent("{timer|mm:ss}"), std::string("{timer|mm:ss}"));
+}
+
+TEST(tokens_find_reports_the_layer)
+{
+	TokenContext tokens;
+	std::string value;
+
+	tokens.setSourceVariables({{"count", "4"}});
+	CHECK(tokens.find("count", value) == TokenContext::Layer::Source);
+	CHECK_EQ(value, std::string("4"));
+
+	tokens.set("count", "9");
+	CHECK(tokens.find("count", value) == TokenContext::Layer::Runtime);
+	CHECK_EQ(value, std::string("9"));
+
+	CHECK(tokens.find("nothing", value) == TokenContext::Layer::None);
+}
+
+TEST(numbers_interpolate_between_two_texts)
+{
+	std::string out;
+
+	CHECK(interpolateNumbers("Followers: 100", "Followers: 200", 0.5, out));
+	CHECK_EQ(out, std::string("Followers: 150"));
+
+	CHECK(interpolateNumbers("Followers: 100", "Followers: 200", 0.0, out));
+	CHECK_EQ(out, std::string("Followers: 100"));
+
+	CHECK(interpolateNumbers("1,000 subs", "2,000 subs", 0.5, out));
+	CHECK_EQ(out, std::string("1,500 subs"));
+
+	CHECK(interpolateNumbers("$1.50", "$2.50", 0.5, out));
+	CHECK_EQ(out, std::string("$2.00"));
+
+	// Counting down rounds towards where it started, never past the end.
+	CHECK(interpolateNumbers("10", "0", 0.95, out));
+	CHECK_EQ(out, std::string("1"));
+
+	// The words around the numbers must match.
+	CHECK(!interpolateNumbers("Score 1", "Lives 2", 0.5, out));
+	CHECK(!interpolateNumbers("no numbers", "no numbers", 0.5, out));
+}
+
+TEST(numbers_parse_like_an_overlay_writes_them)
+{
+	double v = 0.0;
+
+	CHECK(parseNumber("1,234", v));
+	CHECK_EQ(v, 1234.0);
+	CHECK(parseNumber(" -3.5 ", v));
+	CHECK_EQ(v, -3.5);
+	CHECK(!parseNumber("12 apples", v));
+	CHECK(!parseNumber("", v));
+}
+
+// ---- markup ------------------------------------------------------------------
+
+TEST(markup_effect_tags)
+{
+	const auto blocks = parseMarkup("calm [shake]angry[/shake] [wave=2]wavy[/wave] [effect=rainbow]hue[/effect]");
+
+	Style base;
+	std::vector<Effect> seen;
+	float waveStrength = 0.0f;
+
+	for (const Run &run : blocks[0].runs) {
+		const Style s = run.style.resolve(base);
+
+		if (s.effect.kind != Effect::None)
+			seen.push_back(s.effect.kind);
+
+		if (s.effect.kind == Effect::Wave)
+			waveStrength = s.effect.strength;
+	}
+
+	CHECK_EQ(seen.size(), size_t(3));
+	CHECK(seen[0] == Effect::Shake);
+	CHECK(seen[1] == Effect::Wave);
+	CHECK(seen[2] == Effect::Rainbow);
+	CHECK_EQ(waveStrength, 2.0f);
+}
+
+TEST(markup_gradient_and_glow_tags)
+{
+	const auto blocks = parseMarkup("[gradient=#f00,#0f0,#00f]rgb[/gradient] [glow=#ff0]lit[/glow]");
+
+	Style base;
+	const Style gradient = blocks[0].runs[0].style.resolve(base);
+
+	CHECK(gradient.fill.type == FillType::Linear);
+	CHECK_EQ(gradient.fill.stops, std::string("#0f0"));
+	CHECK_EQ(gradient.fill.color.r, 1.0f);
+	CHECK_EQ(gradient.fill.color2.b, 1.0f);
+
+	const Style glow = blocks[0].runs.back().style.resolve(base);
+
+	CHECK(glow.glow.enabled);
+	CHECK_EQ(glow.glow.color.g, 1.0f);
+}
+
+// ---- document ----------------------------------------------------------------
+
+TEST(document_scale_sizes_scales_runs_and_base)
+{
+	Document doc;
+	doc.base.sizePx = 40.0f;
+	doc.base.shadow.offsetX = 4.0f;
+	doc.setPlainText("ab");
+
+	StyleOverride big;
+	big.size = 80.0f;
+	doc.applyStyle(1, 2, big);
+
+	doc.scaleSizes(0.5f);
+
+	CHECK_EQ(doc.base.sizePx, 20.0f);
+	CHECK_EQ(doc.base.shadow.offsetX, 2.0f);
+	CHECK_EQ(doc.styleAt(2).sizePx, 40.0f);
+}

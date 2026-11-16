@@ -52,6 +52,27 @@ public:
 		bool clip = false;
 		float clipWidth = 0.0f;
 		float clipHeight = 0.0f;
+
+		// Seconds on the effects' clock.
+		float loopTime = 0.0f;
+
+		// Another source's picture for source-filled text, and where it sits
+		// in source space. Null when there is none.
+		gs_texture_t *sourceTexture = nullptr;
+		float sourceX0 = 0.0f;
+		float sourceY0 = 0.0f;
+		float sourceX1 = 1.0f;
+		float sourceY1 = 1.0f;
+
+		// Fill every letter with the source picture (the filter's mask mode).
+		bool fillAllWithSource = false;
+
+		// Cut the text out of what is already drawn instead of drawing it.
+		bool erase = false;
+
+		// The text's horizontal extent, for the shimmer effect.
+		float shimmerX0 = 0.0f;
+		float shimmerX1 = 1.0f;
 	};
 
 	Renderer();
