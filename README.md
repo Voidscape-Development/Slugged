@@ -381,7 +381,8 @@ Details worth knowing if you work on the renderer, each commented where it matte
 - libobs's OpenGL backend reads **one digit** after `TEXCOORD`, so `TEXCOORD10` would silently read
   `TEXCOORD1`'s data. Vertex attributes stop at `TEXCOORD9` (a `static_assert` guards it), and
   what every quad shares — the motion preset and its timing — is a uniform instead.
-- A soft shadow or glow is the coverage averaged over a disk of taps. Widening Slug's one-pixel
+- A soft shadow or glow is the coverage averaged over a disk of 32 taps, each with a narrow fade
+  of its own; fewer, softer taps leave ripples in the falloff. Widening Slug's one-pixel
   coverage ramp (which the blur motion does) only blurs along the ray the solve weights, so on its
   own it turns a thin stroke into a flat, hard-edged band.
 

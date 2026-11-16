@@ -135,7 +135,7 @@ uniform float fill_all_source;
 uniform float2 shimmer_range;
 
 /* Taps in the soft silhouette's disk blur. */
-#define SOFT_TAPS 12
+#define SOFT_TAPS 32
 
 sampler_state point_clamp {
 	Filter    = Point;
@@ -724,12 +724,17 @@ float4 PSSlug(VertOut f) : TARGET
 			 * whichever ray the solve weights, so a thin stroke turns into a
 			 * flat, hard-edged band; instead the coverage is averaged over taps
 			 * spread evenly across a disk (a Vogel spiral), each with a soft
-			 * edge of its own that hides the gaps between them. Two thirds of
-			 * the reach is the disk and the rest the taps' own fade.
+			 * edge of its own that hides the gaps between them. Three quarters
+			 * of the reach is the disk and the rest the taps' own fade.
+			 *
+			 * The taps must be many and their own fade narrow: with a dozen
+			 * taps each fading over the whole disk, the copies' outlines show
+			 * through as ripples in the falloff. Rotating the spiral per pixel
+			 * instead trades the ripples for visible grain.
 			 */
-			float radius = reach * (2.0 / 3.0);
+			float radius = reach * 0.75;
 			float2 emRadius = radius * emsPerPixel;
-			float2 soft = pixelsPerEm / max(max(blur, radius), 1.0);
+			float2 soft = pixelsPerEm / max(max(blur, radius * 0.45), 1.0);
 
 			for (int i = 0; i < SOFT_TAPS; i++) {
 				float r = sqrt((float(i) + 0.5) / float(SOFT_TAPS));
