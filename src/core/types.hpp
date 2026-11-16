@@ -524,6 +524,12 @@ struct MotionSpec {
 	MotionTrigger trigger = MotionTrigger::TextChange;
 	MotionScope scope = MotionScope::Changed;
 
+	// Whether a live value ticking over ({time}, {timer}, {countdown:...})
+	// counts as the text changing. Off, only content changes do, so a clock
+	// beside a headline does not replay the headline's intro every minute; on,
+	// a countdown's digits animate as they change.
+	bool live = false;
+
 	// Play the preset in reverse on the old text before a text change brings
 	// the new text in.
 	bool exit = false;

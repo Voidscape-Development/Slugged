@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "atlas_cache.hpp"
 #include "geometry.hpp"
+#include "../text/edit_map.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -41,6 +42,14 @@ struct FrameInput {
 	float boxHeight = 0.0f;
 
 	GeometryParams params;
+
+	// Where tokens were replaced, and how long the text was before they were,
+	// so the frame can describe itself in the text as written.
+	std::vector<TokenSpan> tokenSpans;
+	uint32_t writtenSize = 0;
+
+	// Only an open editor needs the edit map.
+	bool wantEditMap = false;
 };
 
 struct FrameOutput {
@@ -67,6 +76,9 @@ struct FrameOutput {
 
 	// Whether drawing is clipped to (0, 0)-(width, height).
 	bool clip = false;
+
+	// Present when the input asked for it.
+	std::shared_ptr<const EditMap> editMap;
 
 	// Stagger units, for timing a pass.
 	uint32_t units = 0;

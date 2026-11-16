@@ -172,6 +172,8 @@ target_sources(
     src/core/types.hpp
     src/core/variables.cpp
     src/core/variables.hpp
+    src/text/edit_map.cpp
+    src/text/edit_map.hpp
     src/text/font_enum.cpp
     src/text/font_enum.hpp
     src/text/font_manager.cpp
@@ -199,10 +201,14 @@ target_sources(
     src/obs/host_tokens.hpp
     src/obs/migrate.cpp
     src/obs/migrate.hpp
+    src/obs/saved_styles.cpp
+    src/obs/saved_styles.hpp
     src/obs/settings.cpp
     src/obs/settings.hpp
     src/obs/slugged_source.cpp
     src/obs/slugged_source.hpp
+    src/obs/start_points.cpp
+    src/obs/start_points.hpp
 )
 
 if(ENABLE_QT)
@@ -213,10 +219,21 @@ if(ENABLE_QT)
       src/ui/color_button.cpp
       src/ui/color_button.hpp
       src/ui/convert_dialog.cpp
+      src/ui/convert_dialog.hpp
+      src/ui/editor_common.hpp
+      src/ui/editor_inspector.cpp
       src/ui/editor_window.cpp
       src/ui/editor_window.hpp
+      src/ui/insert_panel.cpp
+      src/ui/insert_panel.hpp
       src/ui/preview_widget.cpp
       src/ui/preview_widget.hpp
+      src/ui/start_page.cpp
+      src/ui/start_page.hpp
+      src/ui/styles_panel.cpp
+      src/ui/styles_panel.hpp
+      src/ui/widgets.cpp
+      src/ui/widgets.hpp
   )
 else()
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/obs/editor_bridge_stub.cpp)

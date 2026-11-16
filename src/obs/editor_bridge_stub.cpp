@@ -27,6 +27,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 namespace slugged {
 namespace editor {
 
+bool available()
+{
+	return false;
+}
+
 void openFor(obs_source_t *source)
 {
 	UNUSED_PARAMETER(source);

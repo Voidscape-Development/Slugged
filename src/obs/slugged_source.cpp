@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -90,6 +91,13 @@ struct SluggedSource {
 	std::atomic<uint32_t> width{0};
 	std::atomic<uint32_t> height{0};
 
+	// The editor reads these from the UI thread.
+	std::atomic<bool> editorAttached{false};
+	std::atomic<float> timerSeconds{0.0f};
+
+	std::mutex editMutex;
+	std::shared_ptr<const EditMap> editMap;
+
 	obs_hotkey_id replayHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id timerToggleHotkey = OBS_INVALID_HOTKEY_ID;
 	obs_hotkey_id timerResetHotkey = OBS_INVALID_HOTKEY_ID;
@@ -112,6 +120,7 @@ struct SluggedSource {
 	std::string lastExpanded;
 	std::string lastContent;
 	bool built = false;
+	bool builtForEditor = false;
 
 	uint32_t targetWidth = 0;
 	uint32_t targetHeight = 0;
@@ -428,6 +437,14 @@ void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::s
 			ctx->replayChangedOnly = motion.scope == MotionScope::Changed;
 			ctx->replayIsTextChange = true;
 		}
+	} else if (motion.live && motion.trigger == MotionTrigger::TextChange && motionIsTransient(motion.motion) &&
+		   expanded != ctx->lastExpanded) {
+		// Asked for: a live value ticking over animates like any other change,
+		// so a countdown's digits move as they turn.
+		ctx->animRange = diffRange(ctx->lastExpanded, expanded);
+		ctx->replayOnFrame = id;
+		ctx->replayChangedOnly = motion.scope == MotionScope::Changed;
+		ctx->replayIsTextChange = true;
 	} else {
 		ctx->animRange = shiftRange(ctx->animRange, ctx->lastExpanded, expanded);
 	}
@@ -435,12 +452,16 @@ void scheduleBuild(SluggedSource *ctx, const std::string &expanded, const std::s
 	FrameInput input;
 
 	input.document = ctx->authored;
+	input.writtenSize = uint32_t(ctx->authoredPlain.size());
+	input.wantEditMap = ctx->editorAttached;
 
 	{
 		std::lock_guard<std::mutex> lock(ctx->tokenMutex);
 
-		input.document.expandTokens([ctx](const std::string &text) { return ctx->tokens.expand(text); });
+		input.document.expandTokens(ctx->tokens, input.tokenSpans);
 	}
+
+	ctx->builtForEditor = input.wantEditMap;
 
 	if (ctx->isFilter && ctx->targetWidth > 0 && ctx->targetHeight > 0 &&
 	    input.document.sizeMode != SizeMode::Fixed) {
@@ -484,6 +505,12 @@ void applyReadyFrame(SluggedSource *ctx)
 	ctx->width = ready->width;
 	ctx->height = ready->height;
 
+	{
+		std::lock_guard<std::mutex> lock(ctx->editMutex);
+
+		ctx->editMap = ready->editMap;
+	}
+
 	ctx->pendingUpload = std::move(ready);
 	ctx->pendingUploadId = id;
 }
@@ -499,6 +526,8 @@ void tickSource(void *data, float seconds)
 
 	if (ctx->timerRunning)
 		ctx->timer += seconds;
+
+	ctx->timerSeconds = ctx->timer;
 
 	// ---- configuration ---------------------------------------------------
 	bool needBuild = false;
@@ -593,6 +622,10 @@ void tickSource(void *data, float seconds)
 			needBuild = true;
 		}
 	}
+
+	// An editor opening or closing changes what a frame has to carry.
+	if (ctx->editorAttached != ctx->builtForEditor)
+		needBuild = true;
 
 	if (needBuild || !ctx->built)
 		scheduleBuild(ctx, expanded, content);
@@ -875,6 +908,70 @@ void sourceDefaults(obs_data_t *settingsData)
 }
 
 } // namespace
+
+namespace {
+
+SluggedSource *contextOf(obs_source_t *source)
+{
+	if (!isSluggedSource(source))
+		return nullptr;
+
+	return static_cast<SluggedSource *>(obs_obj_get_data(source));
+}
+
+} // namespace
+
+bool isSluggedSource(obs_source_t *source)
+{
+	if (!source)
+		return false;
+
+	const char *id = obs_source_get_unversioned_id(source);
+
+	return id && (std::strcmp(id, kSourceId) == 0 || std::strcmp(id, kFilterId) == 0);
+}
+
+void setEditorAttached(obs_source_t *source, bool attached)
+{
+	if (SluggedSource *ctx = contextOf(source))
+		ctx->editorAttached = attached;
+}
+
+std::shared_ptr<const EditMap> editMapOf(obs_source_t *source)
+{
+	SluggedSource *ctx = contextOf(source);
+
+	if (!ctx)
+		return nullptr;
+
+	std::lock_guard<std::mutex> lock(ctx->editMutex);
+
+	return ctx->editMap;
+}
+
+TimerState timerStateOf(obs_source_t *source)
+{
+	TimerState state;
+
+	if (SluggedSource *ctx = contextOf(source)) {
+		state.seconds = ctx->timerSeconds;
+		state.running = ctx->timerRunning;
+	}
+
+	return state;
+}
+
+std::string expandFor(obs_source_t *source, const std::string &text)
+{
+	SluggedSource *ctx = contextOf(source);
+
+	if (!ctx)
+		return text;
+
+	std::lock_guard<std::mutex> lock(ctx->tokenMutex);
+
+	return ctx->tokens.expand(text);
+}
 
 void registerSluggedSource()
 {

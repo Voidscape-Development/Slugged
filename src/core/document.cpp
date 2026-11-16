@@ -306,6 +306,51 @@ bool Document::expandTokens(const std::function<std::string(const std::string &)
 	return changed;
 }
 
+bool Document::expandTokens(const TokenContext &tokens, std::vector<TokenSpan> &spans)
+{
+	bool changed = false;
+
+	uint32_t src = 0;
+	uint32_t dst = 0;
+
+	for (Block &block : blocks) {
+		for (Run &run : block.runs) {
+			const uint32_t length = uint32_t(run.text.size());
+
+			if (run.text.find('{') == std::string::npos) {
+				src += length;
+				dst += length;
+				continue;
+			}
+
+			std::vector<TokenSpan> local;
+			std::string expanded = tokens.expand(run.text, local);
+
+			for (TokenSpan span : local) {
+				span.srcStart += src;
+				span.srcEnd += src;
+				span.dstStart += dst;
+				span.dstEnd += dst;
+				spans.push_back(span);
+			}
+
+			src += length;
+			dst += uint32_t(expanded.size());
+
+			if (expanded != run.text) {
+				run.text = std::move(expanded);
+				changed = true;
+			}
+		}
+
+		// The paragraph break.
+		src++;
+		dst++;
+	}
+
+	return changed;
+}
+
 void Document::applyStyle(size_t start, size_t end, const StyleOverride &delta)
 {
 	if (end < start)

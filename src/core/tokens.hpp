@@ -20,8 +20,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "variables.hpp"
 
+#include <cstdint>
 #include <ctime>
 #include <string>
+#include <vector>
 
 namespace slugged {
 
@@ -47,6 +49,18 @@ namespace slugged {
 //
 // Expansion is non-recursive: a value containing braces is inserted literally,
 // so no input can produce an infinite loop.
+// Where one replaced token came from and went to: [srcStart, srcEnd) in the
+// text as written, [dstStart, dstEnd) in the expanded text. The editor uses
+// these to treat a live value on the canvas as the one token it stands for.
+struct TokenSpan {
+	uint32_t srcStart = 0;
+	uint32_t srcEnd = 0;
+	uint32_t dstStart = 0;
+	uint32_t dstEnd = 0;
+
+	bool operator==(const TokenSpan &) const = default;
+};
+
 class TokenContext {
 public:
 	// The runtime table: what a script pushes in. It is not saved, and it does
@@ -65,6 +79,10 @@ public:
 	// Every recognised token replaced. Unknown tokens stay exactly as written so
 	// a typo is visible on screen.
 	std::string expand(const std::string &text) const;
+
+	// The same, also recording every span that was replaced (a "{{" escape
+	// included, since it too changes the length).
+	std::string expand(const std::string &text, std::vector<TokenSpan> &spans) const;
 
 	// Only content tokens replaced; live ones are left as written. Two texts
 	// whose content expansions are equal differ only by clocks ticking.
@@ -87,7 +105,7 @@ private:
 
 	Origin lookup(const std::string &name, const std::string &arg, std::string &out) const;
 	bool builtin(const std::string &name, const std::string &arg, std::string &out) const;
-	std::string expandImpl(const std::string &text, bool liveToo) const;
+	std::string expandImpl(const std::string &text, bool liveToo, std::vector<TokenSpan> *spans) const;
 
 	VariableMap _runtime;
 	VariableMap _source;

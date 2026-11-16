@@ -78,6 +78,31 @@ struct LineInfo {
 	float width = 0.0f;
 	float ascent = 0.0f;
 	float descent = 0.0f;
+
+	// The text this line holds, as byte offsets into the document's plain
+	// text: [textStart, textEnd), where textEnd is where the next line starts
+	// or, on a paragraph's last line, the paragraph's end.
+	uint32_t textStart = 0;
+	uint32_t textEnd = 0;
+
+	// True when the paragraph reads right to left.
+	bool rtl = false;
+};
+
+// The box one cluster of text occupies on its line, whitespace included. This
+// is what a caret, a selection highlight and a click are resolved against.
+struct CaretCell {
+	uint32_t lineIndex = 0;
+
+	float x0 = 0.0f;
+	float x1 = 0.0f;
+
+	// Byte offsets [start, end) into the document's plain text.
+	uint32_t start = 0;
+	uint32_t end = 0;
+
+	// True when the cluster reads right to left, so its start is its right edge.
+	bool rtl = false;
 };
 
 struct LayoutResult {
@@ -88,6 +113,9 @@ struct LayoutResult {
 	std::vector<PositionedGlyph> glyphs;
 	std::vector<LineInfo> lines;
 	std::vector<DecorationRect> decorations;
+
+	// In visual order within each line.
+	std::vector<CaretCell> cells;
 
 	// The box the text was laid out in: the fixed box's inner size, or the
 	// text's own extent for an auto-sized source.

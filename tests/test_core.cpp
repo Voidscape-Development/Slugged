@@ -331,3 +331,37 @@ TEST(variables_parse_assignments)
 	CHECK_EQ(values.at("x"), std::string("a=b"));
 	CHECK(values.find("") == values.end());
 }
+
+TEST(tokens_report_where_they_were_replaced)
+{
+	TokenContext tokens;
+	tokens.set("name", "Ada");
+
+	std::vector<TokenSpan> spans;
+
+	CHECK_EQ(tokens.expand("hi {name}, {{x} {nope}", spans), std::string("hi Ada, {x} {nope}"));
+	CHECK_EQ(spans.size(), size_t(2));
+
+	CHECK(spans[0] == (TokenSpan{3, 9, 3, 6}));
+
+	// The "{{" escape shrinks too; an unknown token does not.
+	CHECK(spans[1] == (TokenSpan{11, 13, 8, 9}));
+}
+
+TEST(document_token_spans_are_in_document_offsets)
+{
+	TokenContext tokens;
+	tokens.set("a", "long value");
+
+	Document doc;
+	doc.setPlainText("x{a}\n{a}y");
+
+	std::vector<TokenSpan> spans;
+
+	CHECK(doc.expandTokens(tokens, spans));
+	CHECK_EQ(doc.plainText(), std::string("xlong value\nlong valuey"));
+	CHECK_EQ(spans.size(), size_t(2));
+
+	CHECK(spans[0] == (TokenSpan{1, 4, 1, 11}));
+	CHECK(spans[1] == (TokenSpan{5, 8, 12, 22}));
+}

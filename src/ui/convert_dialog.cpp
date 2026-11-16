@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
+#include "convert_dialog.hpp"
 #include "../obs/editor_bridge.hpp"
 #include "../obs/migrate.hpp"
 
@@ -44,6 +45,8 @@ QString tr_(const char *key)
 // Slugged sources in place: same name, same position and transform in every
 // scene, same filters. Converting an overlay is then one dialog rather than
 // rebuilding each text element by hand.
+} // namespace
+
 void showConvertDialog()
 {
 	auto *parent = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -114,8 +117,6 @@ void showConvertDialog()
 
 	QMessageBox::information(parent, tr_("Convert.Title"), tr_("Convert.Done").arg(converted));
 }
-
-} // namespace
 
 namespace editor {
 

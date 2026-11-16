@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include "tokens.hpp"
 #include "types.hpp"
 
 #include <cstddef>
@@ -116,6 +117,10 @@ struct Document {
 	// and therefore every per-character style -- exactly as it was. Returns true
 	// when any run changed. A token has to sit inside one run to be recognised.
 	bool expandTokens(const std::function<std::string(const std::string &)> &expand);
+
+	// The same through a TokenContext, also recording where every replaced
+	// token sat, as offsets into the plain text before and after.
+	bool expandTokens(const TokenContext &tokens, std::vector<TokenSpan> &spans);
 
 	// ---- styling ---------------------------------------------------------
 
