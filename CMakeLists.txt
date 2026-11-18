@@ -10,6 +10,7 @@ project(${_name} VERSION ${_version})
 # src/obs/editor_bridge_stub.cpp.
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
+option(ENABLE_BUILD_LEGACY "Enable legacy build" ON)
 
 if(ENABLE_QT AND NOT ENABLE_FRONTEND_API)
   message(FATAL_ERROR "ENABLE_QT requires ENABLE_FRONTEND_API: the editor parents itself to OBS's main window")
