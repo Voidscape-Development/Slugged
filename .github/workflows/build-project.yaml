@@ -90,10 +90,7 @@ jobs:
           : Set Up Environment 🔧
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          # The runner's default Xcode (26.6) breaks Qt's AUTOMOC with the OBS 31 dependencies
-          # ("conflicting deployment targets"), so keep the Xcode this build is known to work with.
-          print '::group::Enable Xcode 16.1'
-          sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+          print '::group::Xcode Version'
           xcodebuild -version
           print '::endgroup::'
 
