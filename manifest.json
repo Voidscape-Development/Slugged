@@ -1,0 +1,18 @@
+{
+    "display_name": "Slugged",
+    "id": "522c102e-de7d-4688-b23f-358ddc62856d",
+    "version": "1.0.0",
+    "authors": [
+        "Voidscape Development"
+    ],
+    "name": "slugged",
+    "description": "GPU vector text for OBS Studio, built on slughorn.",
+    "long_description": "GPU vector text for OBS Studio, built on slughorn — AlphaPixel's MIT-licensed implementation of Eric Lengyel's Slug algorithm.",
+    "urls": {
+        "repository": "https://github.com/Voidscape-Development/Slugged",
+        "website": "https://github.com/Voidscape-Development/Slugged",
+        "support": "https://github.com/Voidscape-Development/Slugged/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}
